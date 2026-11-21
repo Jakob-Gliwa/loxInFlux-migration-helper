@@ -3,8 +3,10 @@
 //! The state file is streamed; windows are counted in parallel (`--parallel`)
 //! with one `count()` query each, which InfluxDB answers from its index.
 
-use super::{Resources, connect_target, date, sh};
+use super::{Resources, connect, connect_target, date, sh};
 use crate::cli::{Global, VerifyArgs};
+use crate::convert::Rules;
+use crate::deep::{DeepResult, deep_window};
 use crate::error::{Failure, Kind, fail};
 use crate::flux::{for_each_row, lit};
 use crate::guard::{MemWatch, Shared};
@@ -27,6 +29,21 @@ struct WindowResult {
     missing: u64,
     extra: u64,
     missing_by_measurement: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deep: Option<DeepResult>,
+}
+
+#[derive(Serialize, Default)]
+struct DeepTotals {
+    windows_compared: usize,
+    windows_with_differences: usize,
+    series_compared: usize,
+    series_missing: usize,
+    series_different: usize,
+    series_extra: usize,
+    source_values: u64,
+    target_values: u64,
+    examples: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -45,7 +62,17 @@ struct Report {
     missing_by_measurement: BTreeMap<String, u64>,
     /// Only windows that are not exactly as expected (sorted by start).
     windows: Vec<WindowResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deep: Option<DeepTotals>,
     resources: Resources,
+}
+
+struct DeepCtx {
+    src: Client,
+    src_bucket: String,
+    rules: Rules,
+    scope: Vec<(String, String)>,
+    every: usize,
 }
 
 fn check(client: &Client, bucket: &str, rec: &WindowRecord) -> anyhow::Result<WindowResult> {
@@ -70,6 +97,7 @@ fn check(client: &Client, bucket: &str, rec: &WindowRecord) -> anyhow::Result<Wi
         missing: 0,
         extra: 0,
         missing_by_measurement: BTreeMap::new(),
+        deep: None,
     };
     for (m, exp) in &rec.written_by_measurement {
         let got = actual.get(m).copied().unwrap_or(0);
@@ -103,13 +131,33 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         .hint("run migrate without --dry-run first")
         .into());
     }
-    let shared = Arc::new(Shared::default());
+    let shared = Shared::new_registered();
     let mem = MemWatch::start(g.memory_limit_mb, shared.clone());
     let client = Arc::new(connect_target(g)?);
     let target = client.bucket(&header.target)?;
-    info!(target = %target.name, state_file = %a.state.display(), parallel = g.parallel, "verify started");
+    let deep = if a.deep {
+        if header.source.starts_with("file:") {
+            return Err(fail(
+                Kind::Usage,
+                "--deep needs the source bucket; this migration came from a line protocol file",
+            )
+            .into());
+        }
+        let rules = header.rules.clone().unwrap_or_default();
+        let scope = crate::commands::migrate::parse_scope(&header.convert_where_tag)?;
+        Some(DeepCtx {
+            src: connect(g)?,
+            src_bucket: header.source.clone(),
+            rules,
+            scope,
+            every: a.sample_every.max(1),
+        })
+    } else {
+        None
+    };
+    info!(target = %target.name, state_file = %a.state.display(), parallel = g.parallel, deep = a.deep, "verify started");
 
-    let (job_tx, job_rx) = bounded::<WindowRecord>(g.parallel.max(1) * 2);
+    let (job_tx, job_rx) = bounded::<(usize, WindowRecord)>(g.parallel.max(1) * 2);
     let (res_tx, res_rx) = unbounded::<anyhow::Result<(WindowRecord, WindowResult)>>();
     let mut out = Report {
         target: target.name.clone(),
@@ -125,24 +173,47 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         extra_total: 0,
         missing_by_measurement: BTreeMap::new(),
         windows: Vec::new(),
+        deep: a.deep.then(DeepTotals::default),
         resources: Resources::default(),
     };
 
     let scoped = std::thread::scope(|s| -> anyhow::Result<()> {
         for _ in 0..g.parallel.max(1) {
-            let (job_rx, res_tx, client, bucket, shared) = (
+            let (job_rx, res_tx, client, bucket, shared, deep) = (
                 job_rx.clone(),
                 res_tx.clone(),
                 client.clone(),
                 &target.name,
                 &shared,
+                &deep,
             );
             s.spawn(move || {
-                for rec in job_rx.iter() {
+                for (idx, rec) in job_rx.iter() {
                     if shared.aborted() {
                         break;
                     }
-                    let r = check(&client, bucket, &rec).map(|w| (rec, w));
+                    let r = check(&client, bucket, &rec).and_then(|mut w| {
+                        if let Some(d) = deep
+                            && idx % d.every == 0
+                        {
+                            let win = crate::window::Window {
+                                start: rec.start_ns,
+                                stop: rec.stop_ns,
+                            };
+                            w.deep = Some(deep_window(
+                                &d.src,
+                                &d.src_bucket,
+                                &client,
+                                bucket,
+                                win,
+                                &d.rules,
+                                &d.scope,
+                                shared.flag(),
+                            )?);
+                        }
+                        Ok(w)
+                    });
+                    let r = r.map(|w| (rec, w));
                     let failed = r.is_err();
                     let _ = res_tx.send(r);
                     if failed {
@@ -155,9 +226,11 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         drop(job_rx);
         let state_path = a.state.clone();
         let feeder = s.spawn(move || {
+            let mut idx = 0usize;
             let r = state::for_each_window(&state_path, |rec| {
+                idx += 1;
                 job_tx
-                    .send(rec)
+                    .send((idx - 1, rec))
                     .map_err(|_| anyhow::anyhow!("verify workers stopped"))
             });
             drop(job_tx);
@@ -188,7 +261,27 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
             if w.extra > 0 {
                 out.windows_with_extra += 1;
             }
-            if w.missing == 0 && w.extra == 0 {
+            let mut deep_bad = false;
+            if let (Some(d), Some(t)) = (&w.deep, out.deep.as_mut()) {
+                t.windows_compared += 1;
+                t.series_compared += d.series_compared;
+                t.series_missing += d.series_missing;
+                t.series_different += d.series_different;
+                t.series_extra += d.series_extra;
+                t.source_values += d.source_values;
+                t.target_values += d.target_values;
+                deep_bad = d.series_missing + d.series_different > 0;
+                if deep_bad {
+                    t.windows_with_differences += 1;
+                    warn!(start = %w.start, missing = d.series_missing, different = d.series_different, "deep compare: values differ");
+                    for e in &d.examples {
+                        if t.examples.len() < 20 {
+                            t.examples.push(format!("{}: {e}", w.start));
+                        }
+                    }
+                }
+            }
+            if w.missing == 0 && w.extra == 0 && !deep_bad {
                 out.windows_ok += 1;
             } else {
                 out.windows.push(w);
@@ -251,16 +344,41 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         let _ = writeln!(human, "  missing in {m}: {}", n(**c));
     }
 
+    if let Some(d) = &out.deep {
+        let _ = writeln!(
+            human,
+            "Deep: {} windows, {} series compared ({} source values, {} target values): {} missing, {} different, {} extra",
+            d.windows_compared,
+            n(d.series_compared as u64),
+            n(d.source_values),
+            n(d.target_values),
+            d.series_missing,
+            d.series_different,
+            d.series_extra
+        );
+        for e in d.examples.iter().take(a.top) {
+            let _ = writeln!(human, "  {e}");
+        }
+    }
+    let deep_bad = out
+        .deep
+        .as_ref()
+        .is_some_and(|d| d.series_missing + d.series_different > 0);
     let mut o = Outcome::ok(&out, human);
     if out.extra_total > 0 {
         o.warnings.push("the target holds more values than were migrated; expected if live data is also written to it (dual write), otherwise check for other writers".into());
     }
-    if out.missing_total > 0 {
+    if out.missing_total > 0 || deep_bad {
         let first = out
             .windows
             .iter()
-            .find(|w| w.missing > 0)
-            .expect("missing > 0");
+            .find(|w| {
+                w.missing > 0
+                    || w.deep
+                        .as_ref()
+                        .is_some_and(|d| d.series_missing + d.series_different > 0)
+            })
+            .expect("a window differs");
         if !header.source.starts_with("file:") {
             o.next_steps.push(format!(
                 "loxinflux-migrationshelper migrate --source-bucket {} --target-bucket {} --start {} --stop {} --redo --state {}",
@@ -274,7 +392,11 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         o.failure = Some(
             Failure::new(
                 Kind::VerifyMismatch,
-                format!("{} values are missing in {} windows", out.missing_total, out.windows_with_missing),
+                if out.missing_total > 0 {
+                    format!("{} values are missing in {} windows", out.missing_total, out.windows_with_missing)
+                } else {
+                    "deep comparison found series whose values differ between source and target".to_owned()
+                },
             )
             .hint("re-migrate the affected windows with --redo and a --start/--stop covering them, then verify again"),
         );

@@ -4,7 +4,6 @@ use crate::convert::FieldValue;
 use crate::error::{Kind, fail};
 use crate::lp::Point;
 use crate::window::{Window, fmt_time};
-use anyhow::Context as _;
 use chrono::DateTime;
 use std::io::Read;
 
@@ -53,6 +52,18 @@ impl Header {
     }
 }
 
+/// A failure while streaming a result is almost always the connection
+/// (timeout, InfluxDB restarted); classify it so callers know to retry.
+pub fn read_error(e: csv::Error) -> anyhow::Error {
+    if e.is_io_error() {
+        fail(Kind::Connection, format!("lost the connection while reading the query result: {e}"))
+            .hint("rerun the same command to resume; if it repeats, use a smaller --window or a larger --timeout-secs")
+            .into()
+    } else {
+        anyhow::Error::new(e).context("reading the query result")
+    }
+}
+
 /// Calls `f` for every data row of an annotated CSV stream. A Flux error
 /// table is turned into an error.
 pub fn for_each_row<R: Read>(
@@ -68,10 +79,7 @@ pub fn for_each_row<R: Read>(
     let mut expect_header = false;
     let mut error_table = false;
     let mut rec = csv::StringRecord::new();
-    while rdr
-        .read_record(&mut rec)
-        .context("reading the query result")?
-    {
+    while rdr.read_record(&mut rec).map_err(read_error)? {
         let first = rec.get(0).unwrap_or("");
         if first.starts_with('#') {
             if first == "#datatype" {

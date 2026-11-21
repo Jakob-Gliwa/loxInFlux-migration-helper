@@ -266,6 +266,13 @@ pub struct VerifyArgs {
     /// How many mismatching measurements the human summary lists.
     #[arg(long, default_value_t = 15)]
     pub top: usize,
+    /// Also compare every value: read source and target, replay the conversion,
+    /// compare count and checksum per series and field. Reads both buckets fully.
+    #[arg(long)]
+    pub deep: bool,
+    /// With --deep: only every Nth window gets the deep comparison (counts are checked for all).
+    #[arg(long, default_value_t = 1)]
+    pub sample_every: usize,
 }
 
 #[derive(Args)]

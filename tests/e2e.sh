@@ -58,6 +58,17 @@ check "rerun: resumes, nothing to do" "grep -q '\"windows_migrated_now\": 0' r.j
 
 L --output json verify --state lmh-state-src-to-dst.jsonl > v.json 2>/dev/null; rc=$?
 check "verify: exit 0" "[ $rc = 0 ] && grep -q '\"missing_total\": 0' v.json"
+L --output json verify --state lmh-state-src-to-dst.jsonl --deep > vd.json 2>/dev/null; rc=$?
+check "verify --deep: exit 0, every value matches" "[ $rc = 0 ] && grep -q '\"series_different\": 0' vd.json && grep -q '\"series_missing\": 0' vd.json"
+w dst 'Temperatur,application=loxInFlux,room=Bad,uuid=u1 AQ=99.5 1700000000' >/dev/null
+L verify --state lmh-state-src-to-dst.jsonl >/dev/null 2>&1; rc=$?
+check "a changed value passes the count check" "[ $rc = 0 ]"
+L --output json verify --state lmh-state-src-to-dst.jsonl --deep > vd2.json 2>/dev/null; rc=$?
+check "... but verify --deep catches it: exit 7" "[ $rc = 7 ] && grep -q '\"series_different\": 1' vd2.json"
+L migrate --source-bucket src --target-bucket dst --start 2023-11-14 --stop 2023-11-15 --redo "${SCOPE[@]}" >/dev/null 2>&1
+L verify --state lmh-state-src-to-dst.jsonl --deep >/dev/null 2>&1; rc=$?
+check "redo repairs it, deep verify exit 0" "[ $rc = 0 ]"
+
 
 AQ='from(bucket:"dst")|>range(start:2023-01-01T00:00:00Z)|>filter(fn:(r)=>r._measurement=="Temperatur" and r._field=="AQ")'
 check "target: all 3 AQ values readable across shards" "[ \$(qa '$AQ' | grep -c ',AQ,') = 3 ]"

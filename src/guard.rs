@@ -41,6 +41,40 @@ impl Shared {
     }
 }
 
+static CURRENT: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
+static SIGNALS: AtomicU64 = AtomicU64::new(0);
+
+/// Route SIGINT/SIGTERM to the running command: the first signal stops it
+/// cleanly (finished work stays recorded, exit code 10), a second one exits
+/// immediately.
+pub fn install_signal_handler() {
+    let _ = ctrlc::set_handler(|| {
+        if SIGNALS.fetch_add(1, Ordering::SeqCst) > 0 {
+            eprintln!("second interrupt, exiting immediately");
+            std::process::exit(130);
+        }
+        warn!("interrupted, stopping after in-flight requests (press again to exit immediately)");
+        if let Some(s) = CURRENT.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            s.fail(
+                fail(Kind::Interrupted, "interrupted by signal")
+                    .hint("rerun the same command to resume; finished windows are recorded")
+                    .into(),
+            );
+        } else {
+            std::process::exit(130);
+        }
+    });
+}
+
+impl Shared {
+    /// Create and register as the target of signal handling.
+    pub fn new_registered() -> Arc<Self> {
+        let s = Arc::new(Self::default());
+        *CURRENT.lock().unwrap_or_else(|p| p.into_inner()) = Some(s.clone());
+        s
+    }
+}
+
 pub fn aborted_error() -> anyhow::Error {
     fail(
         Kind::Internal,

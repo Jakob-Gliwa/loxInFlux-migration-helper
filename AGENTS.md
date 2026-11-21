@@ -11,7 +11,7 @@ agents that **change** its code.
   everything else (logs, progress) is on stderr. Schema: [docs/output.md](docs/output.md).
 * Decide by `exit_code` / `error.kind`, not by parsing text:
   `0` ok · `2 usage` · `3 connection` · `4 auth` · `5 not_found` ·
-  `6 write_rejected` · `7 verify_mismatch` · `8 refused` · `9 resource_limit` · `1 internal`.
+  `6 write_rejected` · `7 verify_mismatch` · `8 refused` · `9 resource_limit` · `10 interrupted` · `1 internal`.
 * `error.hint` says what to change; `next_steps` holds copy-ready follow-up
   commands. They are suggestions — check them against the user's goal.
 * Configure via environment, never interactively: `INFLUX_URL`, `INFLUX_ORG`,
@@ -45,14 +45,16 @@ choice; `verify` will then report extra values as a warning).
 2. `migrate ... --dry-run --output json` → check `values_written`,
    `values_dropped`, `actions`. Explain drops (empty strings, placeholders).
 3. With approval: `migrate ... --create-target --output json`.
-   * Exit 3 or a timeout: rerun the identical command; finished windows are
+   * Exit 3, 10 or a timeout: rerun the identical command; finished windows are
      skipped (state file). Do not delete the state file.
+   * Exit 8 "in use": another run holds the state file; do not start a second one.
    * Exit 9: a memory guard stopped the run. Rerun with lower `--parallel`,
      `--writers` or `--batch-mb` (own memory) or wait and/or lower `--writers`
      (InfluxDB heap). Finished windows are kept.
    * Exit 6: the target already has conflicting types — usually the wrong
      target bucket. Stop and ask.
-4. `verify --state <file> --output json`.
+4. `verify --state <file> --deep --output json` (`--deep` reads both buckets
+   fully; for a quick check drop it or use `--sample-every 7`).
    * Exit 7: rerun `migrate` with `--redo --start <window start> --stop <window stop>`
      for the windows listed in `result.windows` (or use `next_steps[0]`), then verify again.
 5. `cutover ... --output json` (plan) → show `warnings` (tokens bound to the old

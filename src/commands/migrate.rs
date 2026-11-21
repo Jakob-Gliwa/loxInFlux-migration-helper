@@ -58,7 +58,7 @@ struct Report {
     resources: Resources,
 }
 
-fn parse_scope(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+pub(crate) fn parse_scope(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     raw.iter()
         .map(|s| {
             s.split_once('=')
@@ -115,7 +115,7 @@ pub fn run(g: &Global, a: &MigrateArgs) -> anyhow::Result<Outcome> {
             .hint("migrate into a new bucket; InfluxDB cannot change a field's type in place")
             .into());
     }
-    let shared = Arc::new(Shared::default());
+    let shared = Shared::new_registered();
     let mem = MemWatch::start(g.memory_limit_mb, shared.clone());
     let r = run_inner(g, a, &shared, &mem);
     mem.stop();
@@ -208,6 +208,8 @@ fn run_inner(
         target: a.target_bucket.clone(),
         dry_run: a.dry_run,
         window_secs: grid,
+        rules: Some(rules.clone()),
+        convert_where_tag: a.convert_where_tag.clone(),
     };
     let mut state_writer = state::Writer::open(&state_path, &header)?;
     let finished = if a.redo {

@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod convert;
+mod deep;
 mod error;
 mod fast;
 mod fastcsv;
@@ -42,6 +43,7 @@ fn init_logging(format: LogFormat, level: &str) {
 fn main() {
     let cli = Cli::parse();
     init_logging(cli.global.log_format, &cli.global.log_level);
+    guard::install_signal_handler();
     let g = &cli.global;
     let (name, result) = match &cli.command {
         Command::Analyze(a) => ("analyze", commands::analyze::run(g, a)),

@@ -27,6 +27,12 @@ pub struct Header {
     pub target: String,
     pub dry_run: bool,
     pub window_secs: i64,
+    /// Conversion settings; a resume must use the same ones, and
+    /// `verify --deep` replays them on the source.
+    #[serde(default)]
+    pub rules: Option<crate::convert::Rules>,
+    #[serde(default)]
+    pub convert_where_tag: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -142,10 +148,46 @@ pub struct Writer {
     file: std::fs::File,
 }
 
+/// Remove a partial last line (process killed while appending).
+fn drop_partial_tail(path: &Path) -> anyhow::Result<()> {
+    let data = std::fs::read(path)?;
+    if data.is_empty() || data.ends_with(b"\n") {
+        return Ok(());
+    }
+    let keep = data.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
+    tracing::warn!(path = %path.display(), dropped_bytes = data.len() - keep, "state file ended in a partial line (interrupted write); removing it");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_len(keep as u64)?;
+    Ok(())
+}
+
+fn lock(file: &std::fs::File, path: &Path) -> anyhow::Result<()> {
+    file.try_lock().map_err(|_| {
+        fail(
+            Kind::Refused,
+            format!(
+                "state file {} is in use by another migrate run",
+                path.display()
+            ),
+        )
+        .hint("wait for the other run to finish, or use another --state for a different migration")
+        .into()
+    })
+}
+
 impl Writer {
     /// Open for appending; writes the header when the file is new. Refuses a
     /// file that belongs to another migration.
     pub fn open(path: &Path, header: &Header) -> anyhow::Result<Self> {
+        if path.exists() {
+            // Lock before touching the file, so a running migration is never disturbed.
+            let probe = std::fs::OpenOptions::new().append(true).open(path)?;
+            lock(&probe, path)?;
+            drop_partial_tail(path)?;
+            drop(probe);
+        }
         if let Some(h) = read_header(path)? {
             if h != *header {
                 return Err(fail(
@@ -167,6 +209,7 @@ impl Writer {
                 .into());
             }
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
+            lock(&file, path)?;
             return Ok(Self { file });
         }
         let mut file = std::fs::OpenOptions::new()
@@ -174,6 +217,7 @@ impl Writer {
             .write(true)
             .open(path)
             .with_context(|| format!("creating state file {}", path.display()))?;
+        lock(&file, path)?;
         let mut line = serde_json::to_vec(header)?;
         line.push(b'\n');
         file.write_all(&line)?;
@@ -204,6 +248,8 @@ mod tests {
             target: target.into(),
             dry_run: false,
             window_secs: 86_400,
+            rules: None,
+            convert_where_tag: vec![],
         }
     }
 
@@ -232,8 +278,20 @@ mod tests {
         .unwrap();
         seen.sort();
         assert_eq!((n, seen), (2, vec![(1, 9), (2, 7)]));
-        // Reopen with the same header appends; another target is refused.
+        // A second writer on the same file is refused while the first holds it.
+        let first = Writer::open(&p, &header("new")).unwrap();
+        let err = Writer::open(&p, &header("new")).err().unwrap();
+        assert_eq!(crate::error::classify(&err).0, Kind::Refused);
+        drop(first);
+        // A partial last line (killed mid-write) is removed on open.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&p)
+            .unwrap()
+            .write_all(b"{\"kind\":\"win")
+            .unwrap();
         Writer::open(&p, &header("new")).unwrap();
+        assert_eq!(finished_windows(&p).unwrap(), HashSet::from([1, 2]));
         let err = Writer::open(&p, &header("other")).err().unwrap();
         assert_eq!(crate::error::classify(&err).0, Kind::Refused);
     }

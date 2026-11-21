@@ -157,7 +157,7 @@ fn scan_window(
 }
 
 pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
-    let shared = Arc::new(Shared::default());
+    let shared = Shared::new_registered();
     let mem = MemWatch::start(g.memory_limit_mb, shared.clone());
     let client = Arc::new(connect(g)?);
     let bucket = client.bucket(&a.bucket)?;

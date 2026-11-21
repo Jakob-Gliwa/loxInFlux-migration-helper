@@ -23,3 +23,8 @@ First release.
   pauses writes while InfluxDB's heap is high; exit code 9.
 - `--target-url/--target-token/--target-org`, `--max-rate`, `--no-gzip`,
   `--from-lp -` (stdin), JSON-lines state file.
+- `verify --deep`: per-series count and checksum of every value, source vs
+  target (`--sample-every`).
+- Clean stop on SIGINT/SIGTERM (exit 10), state file lock, repair of a
+  partial last line, lost connections classified as exit 3.
+- SIMD (memchr) scanning in the line protocol path; offline dry run for files.

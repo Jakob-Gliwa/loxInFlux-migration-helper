@@ -19,7 +19,7 @@ Every command prints exactly one object to stdout:
 * `status` is `ok` or `error`; `exit_code` equals the process exit code.
 * `error` is present only when `status` is `error`. `kind` is one of
   `usage`, `connection`, `auth`, `not_found`, `write_rejected`,
-  `verify_mismatch`, `refused`, `resource_limit`, `internal`.
+  `verify_mismatch`, `refused`, `resource_limit`, `interrupted`, `internal`.
 * `analyze`, `migrate` and `verify` results contain `resources`:
   `peak_rss_mib`, `memory_limit_mib`, and for migrate `influx_heap_start_mib`,
   `influx_heap_peak_mib`, `influx_paused_secs` (when the InfluxDB guard is active).
@@ -67,7 +67,8 @@ Actions: `float_kept`, `int_to_float`, `unsigned_to_float`, `bool_to_float`,
 | `windows_checked`, `windows_ok`, `windows_with_missing`, `windows_with_extra` | |
 | `expected_total`, `actual_total`, `missing_total`, `extra_total` | values |
 | `missing_by_measurement` | measurement → missing values (all windows) |
-| `windows[]` | only windows that differ: `start`, `stop`, `expected`, `actual`, `missing`, `extra`, `missing_by_measurement` |
+| `windows[]` | only windows that differ: `start`, `stop`, `expected`, `actual`, `missing`, `extra`, `missing_by_measurement`, with `--deep` also `deep` (see below) |
+| `deep` | with `--deep`: `windows_compared`, `windows_with_differences`, `series_compared`, `series_missing`, `series_different`, `series_extra`, `source_values`, `target_values`, `examples[]` (up to 20 `window: series field (what)`) |
 
 ## `cutover`
 
@@ -87,7 +88,7 @@ Actions: `float_kept`, `int_to_float`, `unsigned_to_float`, `bool_to_float`,
 ## State file
 
 `migrate` writes `lmh-state-<source>-to-<target>[-dry-run].jsonl` (JSON lines):
-a header `{"kind":"header","version":2,"source","target","dry_run","window_secs"}`,
+a header `{"kind":"header","version":2,"source","target","dry_run","window_secs","rules","convert_where_tag"}`,
 then one line per finished window `{"kind":"window","start_ns","stop_ns",
 "values_read","values_written","values_dropped","rejected_batches",
 "written_by_measurement","finished_at"}`. After `--redo` a window can appear

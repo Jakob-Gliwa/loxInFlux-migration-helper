@@ -15,7 +15,6 @@ use crate::fast::{
     T_FLOAT, T_INT, T_STRING, T_UINT, escape_into, parse_time_ns,
 };
 use crate::pipeline::LineSink;
-use anyhow::Context as _;
 use csv::ByteRecord;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,7 +104,7 @@ impl<'a> CsvConverter<'a> {
         let mut rows: u64 = 0;
         while rdr
             .read_byte_record(&mut rec)
-            .context("reading the query result")?
+            .map_err(crate::flux::read_error)?
         {
             let first = rec.get(0).unwrap_or(b"");
             if first.first() == Some(&b'#') {

@@ -46,7 +46,7 @@ impl FieldValue {
 pub const TEXT_PREFIX: &str = "__text__";
 
 /// Switches that correspond to the loxInFlux `[processing]` options.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct Rules {
     pub bool_to_float: bool,
     pub parse_numeric_units: bool,

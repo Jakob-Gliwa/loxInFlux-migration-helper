@@ -27,6 +27,8 @@ pub enum Kind {
     Refused,
     /// A resource guard stopped the run (own memory limit, InfluxDB heap).
     ResourceLimit,
+    /// SIGINT/SIGTERM: stopped cleanly, finished work is recorded.
+    Interrupted,
     /// Anything else, usually a bug or an unexpected server answer.
     Internal,
 }
@@ -43,6 +45,7 @@ impl Kind {
             Kind::VerifyMismatch => 7,
             Kind::Refused => 8,
             Kind::ResourceLimit => 9,
+            Kind::Interrupted => 10,
         }
     }
 }
@@ -109,9 +112,10 @@ mod tests {
             Kind::VerifyMismatch,
             Kind::Refused,
             Kind::ResourceLimit,
+            Kind::Interrupted,
         ];
         let codes: Vec<i32> = kinds.iter().map(|k| k.exit_code()).collect();
-        assert_eq!(codes, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(codes, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 
     #[test]

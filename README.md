@@ -68,7 +68,8 @@ loxinflux-migrationshelper migrate --source-bucket loxinflux --target-bucket lox
   --start 2023-01-01 --convert-where-tag application=loxInFlux --create-target
 
 # 4. Compare what was written with what the target holds, window by window.
-loxinflux-migrationshelper verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl
+#    --deep compares every value (count + checksum per series and field).
+loxinflux-migrationshelper verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl --deep
 
 # 5. Swap names so dashboards that use the bucket name see the migrated data.
 loxinflux-migrationshelper cutover --source-bucket loxinflux --target-bucket loxinflux_v2      # plan only
@@ -129,6 +130,16 @@ omit it for a complete move.
 * **Verifiable.** `migrate` records how many values it wrote per window and
   measurement; `verify` counts what the target holds and reports gaps. Extra
   values (e.g. live data already arriving in the target) are a warning, not an error.
+  `verify --deep` goes further: it reads source and target, replays the
+  conversion on the source and compares, per series and field, the number of
+  values and a checksum over every timestamp and value — a changed value with
+  an unchanged count is caught too. `--sample-every N` limits it to every Nth window.
+* **Robust against interruptions.** SIGINT/SIGTERM (Ctrl-C, `docker stop`)
+  stop cleanly after the in-flight requests (exit code 10); a second signal
+  exits at once. A killed process leaves at most a partial last line in the
+  state file, which is removed on the next start. Lost connections end with
+  exit code 3, write errors are retried with backoff, and a second run on the
+  same state file is refused while the first holds its lock.
 * **Bounded memory, guarded InfluxDB.** See below.
 
 ## Speed and memory
@@ -236,6 +247,7 @@ The old bucket stays as `<source>_pre_migration` until you delete it.
 | 7    | `verify_mismatch`| the target holds fewer values than were migrated           |
 | 8    | `refused`        | unsafe request (same bucket, `--execute` without `--yes`)  |
 | 9    | `resource_limit` | memory guard stopped the run (own RSS, InfluxDB heap)      |
+| 10   | `interrupted`    | stopped by SIGINT/SIGTERM; rerun to resume                 |
 
 ## Limits
 
