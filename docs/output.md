@@ -39,6 +39,7 @@ Every command prints exactly one object to stdout:
 | `fields_total`, `fields_with_type_conflicts` | measurement+field pairs; pairs with more than one type across windows |
 | `migrate_estimate` | action → count (see actions below); `string_unclassified` without `--classify-strings` |
 | `strings_classified` | whether `--classify-strings` was used |
+| `windows_with_influx_query_bug` | windows where InfluxDB panicked on the pushed-down queries and rows were scanned instead |
 | `fields[]` | per pair: `measurement`, `field`, `values`, `types{type: {values, windows, first_window, last_window}}`, with classification also `string_actions{action: n}` and up to 3 `string_examples` per action. Sorted: conflicts first, then by values |
 
 ## `migrate`

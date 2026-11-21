@@ -19,6 +19,7 @@ use crate::output::{Outcome, n};
 use crate::pipeline::{Config, Event, LineSink, Pipeline};
 use crate::state::{self, Header, WindowRecord};
 use crate::window::{NS, Window, grid_secs, now_ns, parse_duration_secs, parse_time, windows};
+use anyhow::Context as _;
 use crossbeam_channel::{bounded, select, unbounded};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -319,7 +320,8 @@ fn run_inner(
                                 pipeline,
                                 job,
                                 &shared,
-                            ),
+                            )
+                            .with_context(|| format!("window {}", date(jobs[job].start))),
                             None => read_lp(
                                 from_lp.as_ref().expect("file mode"),
                                 rules,

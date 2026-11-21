@@ -13,6 +13,7 @@ use crate::guard::{MemWatch, Shared};
 use crate::influx::Client;
 use crate::output::{Outcome, n};
 use crate::state::{self, WindowRecord};
+use anyhow::Context as _;
 use crossbeam_channel::{bounded, unbounded};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -192,6 +193,7 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
                     if shared.aborted() {
                         break;
                     }
+                    let wdate = date(rec.start_ns);
                     let r = check(&client, bucket, &rec).and_then(|mut w| {
                         if let Some(d) = deep
                             && idx % d.every == 0
@@ -213,7 +215,9 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
                         }
                         Ok(w)
                     });
-                    let r = r.map(|w| (rec, w));
+                    let r = r
+                        .with_context(|| format!("window {wdate}"))
+                        .map(|w| (rec, w));
                     let failed = r.is_err();
                     let _ = res_tx.send(r);
                     if failed {

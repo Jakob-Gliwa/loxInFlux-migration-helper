@@ -8,13 +8,14 @@ use crate::guard::{MemWatch, Shared};
 use crate::influx::Client;
 use crate::output::{Outcome, n};
 use crate::window::{Window, grid_secs, parse_duration_secs, parse_time, windows};
+use anyhow::Context as _;
 use crossbeam_channel::{bounded, unbounded};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Default, Serialize)]
 struct TypeStat {
@@ -54,6 +55,8 @@ struct Report {
     /// What `migrate` with default rules would do, by action (strings only if classified).
     migrate_estimate: BTreeMap<String, u64>,
     strings_classified: bool,
+    /// Windows where InfluxDB failed on the pushed-down queries (rows were scanned instead).
+    windows_with_influx_query_bug: Vec<String>,
     fields: Vec<FieldReport>,
     resources: Resources,
 }
@@ -72,6 +75,8 @@ struct WindowScan {
     /// (measurement, field) -> action -> (count, examples)
     strings: HashMap<(String, String), ActionStats>,
     string_values: u64,
+    /// The pushed-down queries failed in InfluxDB; rows were scanned instead.
+    fallback_scan: bool,
 }
 
 fn scan_window(
@@ -85,33 +90,73 @@ fn scan_window(
     let src = flux::source(bucket, w, measurements);
     let mut scan = WindowScan::default();
     // Within one shard a field has exactly one type, so grouping is safe.
-    let q = format!(
-        "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1)"
-    );
-    let mut types: HashMap<(String, String), String> = HashMap::new();
-    for_each_row(client.query(&q)?, |h, r| {
-        let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
-        let t = h
-            .index("_value")
-            .and_then(|i| h.types.get(i))
-            .cloned()
-            .unwrap_or_default();
-        types.insert((get("_measurement"), get("_field")), t);
+    // first()/count() are pushed down into the storage engine, which is fast;
+    // InfluxDB 2.x can panic there on some series ("unreachable: <nil>"), so a
+    // failing window is retried with a plain scan of its rows.
+    let fast = (|| -> anyhow::Result<()> {
+        let q = format!(
+            "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1)"
+        );
+        let mut types: HashMap<(String, String), String> = HashMap::new();
+        for_each_row(client.query(&q)?, |h, r| {
+            let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
+            let t = h
+                .index("_value")
+                .and_then(|i| h.types.get(i))
+                .cloned()
+                .unwrap_or_default();
+            types.insert((get("_measurement"), get("_field")), t);
+            Ok(())
+        })?;
+        if types.is_empty() {
+            return Ok(());
+        }
+        let q =
+            format!("{src} |> count() |> group(columns: [\"_measurement\", \"_field\"]) |> sum()");
+        for_each_row(client.query(&q)?, |h, r| {
+            let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
+            let key = (get("_measurement"), get("_field"));
+            let count: u64 = get("_value").parse().unwrap_or(0);
+            let t = types.get(&key).cloned().unwrap_or_else(|| "unknown".into());
+            let e = scan.fields.entry(key).or_insert((t, 0));
+            e.1 += count;
+            Ok(())
+        })?;
         Ok(())
-    })?;
-    if types.is_empty() {
+    })();
+    if let Err(e) = fast {
+        let msg = format!("{e:#}");
+        if !msg.contains("panic") {
+            return Err(e);
+        }
+        warn!(window = %date(w.start), error = %msg, "InfluxDB failed on the pushed-down query, scanning the window's rows instead");
+        scan.fields.clear();
+        scan.fallback_scan = true;
+        for_each_row(client.query(&src)?, |h, r| {
+            let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("");
+            let t = h
+                .index("_value")
+                .and_then(|i| h.types.get(i))
+                .cloned()
+                .unwrap_or_default();
+            let key = (get("_measurement").to_owned(), get("_field").to_owned());
+            match scan.fields.get_mut(&key) {
+                Some(e) => e.1 += 1,
+                None => {
+                    scan.fields.insert(key, (t, 1));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    if scan.fields.is_empty() {
         return Ok(scan);
     }
-    let q = format!("{src} |> count() |> group(columns: [\"_measurement\", \"_field\"]) |> sum()");
-    for_each_row(client.query(&q)?, |h, r| {
-        let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
-        let key = (get("_measurement"), get("_field"));
-        let count: u64 = get("_value").parse().unwrap_or(0);
-        let t = types.get(&key).cloned().unwrap_or_else(|| "unknown".into());
-        let e = scan.fields.entry(key).or_insert((t, 0));
-        e.1 += count;
-        Ok(())
-    })?;
+    let types: HashMap<(String, String), String> = scan
+        .fields
+        .iter()
+        .map(|(k, (t, _))| (k.clone(), t.clone()))
+        .collect();
     if classify {
         let pairs: Vec<&(String, String)> = types
             .iter()
@@ -185,6 +230,7 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
     let rules = Rules::default();
     let mut fields: BTreeMap<(String, String), FieldReport> = BTreeMap::new();
     let mut windows_with_data = 0;
+    let mut bug_windows: Vec<String> = Vec::new();
     let began = Instant::now();
 
     let (job_tx, job_rx) = bounded::<usize>(ws.len().max(1));
@@ -212,7 +258,8 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
                     if shared.aborted() {
                         break;
                     }
-                    let r = scan_window(client, bucket, ws[i], measurements, classify, rules);
+                    let r = scan_window(client, bucket, ws[i], measurements, classify, rules)
+                        .with_context(|| format!("window {}", date(ws[i].start)));
                     let failed = r.is_err();
                     let _ = res_tx.send((i, r));
                     if failed {
@@ -232,6 +279,9 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
             };
             done += 1;
             let w = ws[i];
+            if scan.fallback_scan {
+                bug_windows.push(date(w.start));
+            }
             if scan.fields.is_empty() {
                 debug!(start = %date(w.start), "window empty");
             } else {
@@ -332,6 +382,10 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
         fields_with_type_conflicts: conflicts,
         migrate_estimate: estimate,
         strings_classified: a.classify_strings,
+        windows_with_influx_query_bug: {
+            bug_windows.sort();
+            bug_windows
+        },
         fields: list,
         resources: Resources {
             peak_rss_mib: mem.peak_mib(),
