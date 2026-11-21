@@ -493,6 +493,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_text_is_copied_byte_exact() {
+        let mut csv = csv_table("string", &[]).into_bytes();
+        csv.truncate(csv.len() - 1); // drop the table's trailing blank line
+        csv.extend_from_slice(
+            b",,0,2023-11-14T00:00:00Z,2023-11-15T00:00:00Z,2023-11-14T22:13:20Z,B",
+        );
+        csv.push(0xfc);
+        csv.extend_from_slice(b"ro,Default,Raum,loxInFlux,\n");
+        let rules = Rules::default();
+        let mut c = CsvConverter::new(&rules, &[]);
+        let mut sink = VecSink::default();
+        c.run(csv.as_slice(), &mut sink, &AtomicBool::new(false))
+            .unwrap();
+        let mut want = b"Raum,application=loxInFlux __text__Default=\"B".to_vec();
+        want.push(0xfc);
+        want.extend_from_slice(b"ro\" 1700000000000000000\n");
+        assert_eq!(sink.data, want);
+    }
+
+    #[test]
     fn error_table_is_reported() {
         let csv =
             "#datatype,string,string\n#group,true,true\n#default,,\n,error,reference\n,boom,\n";

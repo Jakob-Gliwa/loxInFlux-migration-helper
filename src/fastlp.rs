@@ -493,6 +493,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_text_is_copied_byte_exact() {
+        let rules = Rules::default();
+        let mut c = LpConverter::new(&rules, &[], 86_400);
+        let mut line = b"Raum,room=B".to_vec();
+        line.push(0xfc);
+        line.extend_from_slice(b"ro Default=\"B");
+        line.push(0xfc);
+        line.extend_from_slice(b"ro\" 1");
+        let mut out = Vec::new();
+        assert_eq!(c.process(&line, &mut out), Ok(1));
+        let mut want = b"Raum,room=B".to_vec();
+        want.push(0xfc);
+        want.extend_from_slice(b"ro __text__Default=\"B");
+        want.push(0xfc);
+        want.extend_from_slice(b"ro\" 1\n");
+        assert_eq!(out, want);
+    }
+
+    #[test]
     fn untouched_lines_are_copied_verbatim() {
         let rules = Rules::default();
         let mut c = LpConverter::new(&rules, &[], 86_400);

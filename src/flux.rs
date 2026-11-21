@@ -78,8 +78,13 @@ pub fn for_each_row<R: Read>(
     let mut types: Vec<String> = Vec::new();
     let mut expect_header = false;
     let mut error_table = false;
-    let mut rec = csv::StringRecord::new();
-    while rdr.read_record(&mut rec).map_err(read_error)? {
+    // Read bytes and decode lossily: stored strings can contain invalid UTF-8
+    // (e.g. Latin-1 from a Loxone Miniserver); counting and classifying must
+    // not fail on them. The migration itself uses the byte-exact fast path.
+    let mut raw = csv::ByteRecord::new();
+    let mut rec;
+    while rdr.read_byte_record(&mut raw).map_err(read_error)? {
+        rec = csv::StringRecord::from_byte_record_lossy(raw.clone());
         let first = rec.get(0).unwrap_or("");
         if first.starts_with('#') {
             if first == "#datatype" {
@@ -227,6 +232,21 @@ mod tests {
             ("Default".into(), FieldValue::Str("19.6°".into()))
         );
         assert!(points[1].tags.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_is_read_lossily() {
+        let mut csv = b"#datatype,string,long,dateTime:RFC3339,dateTime:RFC3339,dateTime:RFC3339Nano,string,string,string\n#group,false,false,true,true,false,false,true,true\n#default,_result,,,,,,,\n,result,table,_start,_stop,_time,_value,_field,_measurement\n,,0,2023-11-14T00:00:00Z,2023-11-15T00:00:00Z,2023-11-14T22:13:20Z,B".to_vec();
+        csv.push(0xfc); // Latin-1 u-umlaut
+        csv.extend_from_slice(b"ro,Default,Raum\n");
+        let mut n = 0;
+        for_each_row(csv.as_slice(), |h, r| {
+            assert_eq!(r.get(h.index("_value").unwrap()), Some("B\u{fffd}ro"));
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
