@@ -15,7 +15,7 @@ mod pipeline;
 mod state;
 mod window;
 
-use clap::Parser;
+use clap::Parser as _;
 use cli::{Cli, Command, LogFormat};
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
@@ -40,8 +40,52 @@ fn init_logging(format: LogFormat, level: &str) {
     }
 }
 
+/// Command line errors honour `--output json` too, so agents always get JSON.
+fn parse_cli() -> Cli {
+    match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            if matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                e.exit();
+            }
+            let args: Vec<String> = std::env::args().collect();
+            let json = args
+                .windows(2)
+                .any(|w| w[0] == "--output" && w[1] == "json")
+                || args.iter().any(|a| a == "--output=json")
+                || std::env::var("LMH_OUTPUT").is_ok_and(|v| v == "json");
+            if !json {
+                e.exit();
+            }
+            let detail = e.to_string();
+            let first = detail
+                .lines()
+                .next()
+                .unwrap_or("invalid command line")
+                .trim_start_matches("error: ")
+                .to_owned();
+            let code = output::emit(
+                output::Format::Json,
+                "cli",
+                Err((
+                    error::Kind::Usage,
+                    first,
+                    Some("run with --help for the options".to_owned()),
+                )),
+            );
+            std::process::exit(code);
+        }
+    }
+}
+
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     init_logging(cli.global.log_format, &cli.global.log_level);
     guard::install_signal_handler();
     let g = &cli.global;

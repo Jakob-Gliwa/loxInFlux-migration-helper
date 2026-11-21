@@ -92,11 +92,16 @@ fn body_message(resp: Response) -> String {
 }
 
 fn connection_error(base: &str, e: reqwest::Error) -> anyhow::Error {
+    if e.is_timeout() {
+        return fail(Kind::Connection, format!("request to InfluxDB at {base} timed out: {e}"))
+            .hint("rerun the same command to resume; if it repeats, use a smaller --window or a larger --timeout-secs")
+            .into();
+    }
     fail(
         Kind::Connection,
         format!("cannot reach InfluxDB at {base}: {e}"),
     )
-    .hint("check --url / INFLUX_URL and that InfluxDB v2 is running")
+    .hint("check --url / INFLUX_URL and that InfluxDB v2 is running; rerun to resume")
     .into()
 }
 

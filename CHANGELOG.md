@@ -27,4 +27,5 @@ First release.
   target (`--sample-every`).
 - Clean stop on SIGINT/SIGTERM (exit 10), state file lock, repair of a
   partial last line, lost connections classified as exit 3.
+- Command line errors are JSON with `--output json`; timeouts get a resume hint.
 - SIMD (memchr) scanning in the line protocol path; offline dry run for files.
