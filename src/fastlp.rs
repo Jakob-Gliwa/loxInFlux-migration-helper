@@ -89,8 +89,8 @@ fn unescape_key(s: &[u8]) -> String {
 
 pub struct LpConverter<'a> {
     rules: &'a Rules,
-    /// Escaped `,key=value` needles for --convert-where-tag.
-    needles: Vec<Vec<u8>>,
+    /// Escaped `,key=value` needles for --convert-where-tag (SIMD substring search).
+    needles: Vec<memchr::memmem::Finder<'static>>,
     window_ns: i64,
     pub counters: Counters,
     pub windows: WindowCounts,
@@ -107,7 +107,7 @@ impl<'a> LpConverter<'a> {
                 escape_into(&mut n, k.as_bytes(), KEY_SPECIALS);
                 n.push(b'=');
                 escape_into(&mut n, v.as_bytes(), KEY_SPECIALS);
-                n
+                memchr::memmem::Finder::new(&n).into_owned()
             })
             .collect();
         Self {
@@ -127,8 +127,8 @@ impl<'a> LpConverter<'a> {
         }
         self.needles.iter().any(|n| {
             let mut from = 0;
-            while let Some(pos) = find(&series[from..], n) {
-                let end = from + pos + n.len();
+            while let Some(pos) = n.find(&series[from..]) {
+                let end = from + pos + n.needle().len();
                 // Match a whole tag: next byte must end the tag value.
                 if end == series.len() || series[end] == b',' {
                     // ... and the needle's comma must not be escaped.
@@ -150,23 +150,11 @@ impl<'a> LpConverter<'a> {
         if line.is_empty() || line[0] == b'#' {
             return Ok(0);
         }
-        // Series key: up to the first unescaped space.
-        let mut i = 0;
-        let mut meas_end = None;
-        while i < line.len() {
-            match line[i] {
-                b'\\' => i += 1,
-                b',' if meas_end.is_none() => meas_end = Some(i),
-                b' ' => break,
-                _ => {}
-            }
-            i += 1;
-        }
-        if i >= line.len() {
-            return Err(LineError::Invalid("missing fields"));
-        }
+        // Series key: up to the first unescaped space. memchr jumps (SIMD)
+        // from one candidate byte to the next instead of looking at each.
+        let (meas_end, i) = scan_series(line).ok_or(LineError::Invalid("missing fields"))?;
         let series = &line[..i];
-        let measurement = &series[..meas_end.unwrap_or(series.len())];
+        let measurement = &series[..meas_end];
         let fstart = i + 1;
 
         // Fields: split on unescaped commas outside quotes, end at the first
@@ -412,8 +400,29 @@ fn trim(s: &[u8]) -> &[u8] {
     &s[a..e]
 }
 
-fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
+/// (end of measurement, end of series key): the first unescaped `,` and the
+/// first unescaped space. `None` if there is no space (no fields).
+#[inline]
+fn scan_series(line: &[u8]) -> Option<(usize, usize)> {
+    let mut meas_end = None;
+    let mut i = 0;
+    while i < line.len() {
+        let hit = if meas_end.is_none() {
+            memchr::memchr3(b'\\', b',', b' ', &line[i..])
+        } else {
+            memchr::memchr2(b'\\', b' ', &line[i..])
+        }?;
+        let p = i + hit;
+        match line[p] {
+            b'\\' => i = p + 2,
+            b',' => {
+                meas_end = Some(p);
+                i = p + 1;
+            }
+            _ => return Some((meas_end.unwrap_or(p), p)),
+        }
+    }
+    None
 }
 
 #[cfg(test)]

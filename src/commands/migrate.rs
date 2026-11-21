@@ -131,8 +131,15 @@ fn run_inner(
     let rules = a.rules.rules();
     let scope = parse_scope(&a.convert_where_tag)?;
     let requested_window = a.window.as_deref().map(parse_duration_secs).transpose()?;
-    let src = Arc::new(connect(g)?);
-    let tgt = Arc::new(connect_target(g)?);
+    // A dry run over a line protocol file needs no server at all.
+    let offline = a.dry_run && a.from_lp.is_some();
+    let (src, tgt) = if offline {
+        info!("offline dry run: no InfluxDB connection");
+        let c = Arc::new(Client::new(&g.url, "offline", "offline", g.timeout_secs)?);
+        (c.clone(), c)
+    } else {
+        (Arc::new(connect(g)?), Arc::new(connect_target(g)?))
+    };
     let separate_target = g.target_url.is_some() || g.target_org.is_some();
 
     let source_label = match (&a.source_bucket, &a.from_lp) {
@@ -147,7 +154,12 @@ fn run_inner(
         .transpose()?;
 
     let mut target_created = false;
-    let target: Option<Bucket> = match tgt.find_bucket(&a.target_bucket)? {
+    let found = if offline {
+        None
+    } else {
+        tgt.find_bucket(&a.target_bucket)?
+    };
+    let target: Option<Bucket> = match found {
         Some(t) => {
             if !separate_target && source.as_ref().is_some_and(|s| s.id == t.id) {
                 return Err(fail(Kind::Refused, "source and target are the same bucket").into());

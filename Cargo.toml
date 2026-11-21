@@ -19,6 +19,7 @@ crossbeam-channel = "0.5"
 csv = "1"
 flate2 = "1"
 itoa = "1"
+memchr = "2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
 ryu = "1"

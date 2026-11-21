@@ -735,6 +735,7 @@ dependencies = [
  "csv",
  "flate2",
  "itoa",
+ "memchr",
  "regex",
  "reqwest",
  "ryu",
