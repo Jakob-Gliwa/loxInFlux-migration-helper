@@ -150,6 +150,27 @@ Writing is limited by InfluxDB's ingestion (the host was 90–95 % busy, almost
 all of it InfluxDB). Plan roughly 2 hours per billion values on such a machine,
 and use `--max-rate` to keep the server responsive for other services.
 
+### Making InfluxDB ingest faster
+
+A CPU profile of InfluxDB during the migration shows where its time goes:
+~30 % parsing line protocol (long series keys), ~20 % series/field
+validation, ~25 % allocation and garbage collection; disk sync is minor.
+Measured with the same data (4 writers, `--no-gzip`, InfluxDB 2.9):
+
+| influxd setting (env)                        | values/s | heap peak |
+|----------------------------------------------|----------|-----------|
+| defaults                                     | 143 000  | 0.5 GiB   |
+| `INFLUXD_PPROF_DISABLED=true`                | 161 000  | 0.4 GiB   |
+| `GOGC=200`                                   | 160 000  | 0.8 GiB   |
+| both                                         | 171 000  | 0.9 GiB   |
+| `INFLUXD_STORAGE_WAL_FSYNC_DELAY=100ms`      | 111 000  | 0.4 GiB   |
+| `INFLUXD_STORAGE_CACHE_SNAPSHOT_MEMORY_SIZE=100MiB` | 146 000 | 0.8 GiB |
+
+So: for the migration window, consider restarting InfluxDB with pprof
+disabled (and `GOGC=200` if it has memory to spare), and revert afterwards.
+A fsync delay makes it slower, more than 4 writers does not help, and
+`--no-gzip` saves CPU on both sides when InfluxDB runs on the same host.
+
 Memory is bounded by construction — a fixed pool of
 `(parallel + writers) × 2` buffers of `--batch-mb` (default 4 MiB) — and
 enforced: above `--memory-limit-mb` (default 512) the run stops cleanly with
