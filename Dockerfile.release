@@ -1,0 +1,6 @@
+# Used by the release workflow: packages the binaries built there.
+FROM scratch
+ARG TARGETARCH
+COPY dist/${TARGETARCH}/loxinflux-migrationshelper /loxinflux-migrationshelper
+WORKDIR /work
+ENTRYPOINT ["/loxinflux-migrationshelper"]

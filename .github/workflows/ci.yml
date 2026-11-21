@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.99
+        run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  e2e:
+    # Against a real, empty InfluxDB v2 in a service container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      influxdb:
+        image: influxdb:2
+        ports:
+          - 8086:8086
+        env:
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: e2e
+          DOCKER_INFLUXDB_INIT_PASSWORD: e2e-e2e-e2e
+          DOCKER_INFLUXDB_INIT_ORG: o
+          DOCKER_INFLUXDB_INIT_BUCKET: src
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: e2etoken
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      - name: End-to-end
+        env:
+          LMH_E2E_CONTAINER: ${{ job.services.influxdb.id }}
+        run: tests/e2e.sh "$PWD/target/release/loxinflux-migrationshelper"

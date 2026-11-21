@@ -1,0 +1,37 @@
+[package]
+name = "loxinflux-migrationshelper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Migrate an InfluxDB v2 bucket written by loxInFlux 0.3 to the float-only schema of loxInFlux 0.5"
+repository = "https://github.com/Jakob-Gliwa/loxInFlux-migrationshelper"
+license = "MIT"
+readme = "README.md"
+keywords = ["influxdb", "loxone", "migration", "loxinflux"]
+categories = ["command-line-utilities", "database"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive", "env"] }
+csv = "1"
+flate2 = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
+ryu = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[lints.clippy]
+all = "warn"
