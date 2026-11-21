@@ -25,6 +25,8 @@ pub enum Kind {
     VerifyMismatch,
     /// The tool refused to do something unsafe (e.g. source == target).
     Refused,
+    /// A resource guard stopped the run (own memory limit, InfluxDB heap).
+    ResourceLimit,
     /// Anything else, usually a bug or an unexpected server answer.
     Internal,
 }
@@ -40,6 +42,7 @@ impl Kind {
             Kind::WriteRejected => 6,
             Kind::VerifyMismatch => 7,
             Kind::Refused => 8,
+            Kind::ResourceLimit => 9,
         }
     }
 }
@@ -105,9 +108,10 @@ mod tests {
             Kind::WriteRejected,
             Kind::VerifyMismatch,
             Kind::Refused,
+            Kind::ResourceLimit,
         ];
         let codes: Vec<i32> = kinds.iter().map(|k| k.exit_code()).collect();
-        assert_eq!(codes, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(codes, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]

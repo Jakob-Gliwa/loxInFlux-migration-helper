@@ -22,6 +22,38 @@ pub fn connect(g: &Global) -> anyhow::Result<Client> {
     Ok(client)
 }
 
+/// Client for the target server (`--target-*`, defaulting to the source).
+pub fn connect_target(g: &Global) -> anyhow::Result<Client> {
+    if g.target_url.is_none() && g.target_token.is_none() && g.target_org.is_none() {
+        return connect(g);
+    }
+    let url = g.target_url.as_deref().unwrap_or(&g.url);
+    let token = g.target_token.as_deref().unwrap_or(&g.token);
+    let org = g.target_org.as_deref().unwrap_or(&g.org);
+    if org.is_empty() {
+        return Err(fail(Kind::Usage, "no target organisation given")
+            .hint("pass --target-org or --org")
+            .into());
+    }
+    let client = Client::new(url, token, org, g.timeout_secs)?;
+    let version = client.ping()?;
+    info!(target_url = %url, influxdb_version = %version, org = %org, "connected to target");
+    Ok(client)
+}
+
+/// Resource use, reported in every result.
+#[derive(serde::Serialize, Default)]
+pub struct Resources {
+    pub peak_rss_mib: Option<u64>,
+    pub memory_limit_mib: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub influx_heap_start_mib: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub influx_heap_peak_mib: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub influx_paused_secs: Option<u64>,
+}
+
 /// Quote an argument for a copy-paste shell command in `next_steps`.
 pub fn sh(s: &str) -> String {
     if !s.is_empty()

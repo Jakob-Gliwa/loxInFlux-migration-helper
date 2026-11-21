@@ -1,4 +1,5 @@
-//! InfluxDB line protocol: serialising points and parsing `export-lp` files.
+//! InfluxDB line protocol: serialising points. The (slow, simple) parser is
+//! kept for tests: it is the reference the fast paths are checked against.
 
 use crate::convert::FieldValue;
 use std::fmt::Write as _;
@@ -14,6 +15,7 @@ pub struct Point {
 }
 
 impl Point {
+    #[cfg(test)]
     pub fn tag(&self, key: &str) -> Option<&str> {
         self.tags
             .iter()
@@ -73,6 +75,7 @@ pub fn write_point(out: &mut String, p: &Point) {
     let _ = writeln!(out, " {}", p.time);
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     /// The line ends inside a quoted string; the caller should append the
@@ -81,6 +84,7 @@ pub enum ParseError {
     Invalid(String),
 }
 
+#[cfg(test)]
 /// Split at the first unescaped occurrence of `stop` (outside quotes when
 /// `quotes` is true). Returns (head, rest-after-stop).
 fn split_unescaped<'a>(
@@ -113,6 +117,7 @@ fn split_unescaped<'a>(
     Ok((s, None))
 }
 
+#[cfg(test)]
 fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -130,6 +135,7 @@ fn unescape(s: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn parse_value(raw: &str) -> Result<FieldValue, ParseError> {
     let bad = || ParseError::Invalid(format!("invalid field value `{raw}`"));
     if let Some(inner) = raw.strip_prefix('"') {
@@ -150,6 +156,7 @@ fn parse_value(raw: &str) -> Result<FieldValue, ParseError> {
     raw.parse().map(FieldValue::Float).map_err(|_| bad())
 }
 
+#[cfg(test)]
 /// Parse one logical line. Lines without a timestamp get `default_time`.
 pub fn parse_line(line: &str, default_time: i64) -> Result<Point, ParseError> {
     let line = line.trim_end_matches(['\n', '\r']);
@@ -205,81 +212,6 @@ pub fn parse_line(line: &str, default_time: i64) -> Result<Point, ParseError> {
         fields,
         time,
     })
-}
-
-/// Iterates over the points of a line protocol stream. Comment lines (`#`)
-/// and blank lines are skipped; strings with embedded newlines are joined.
-pub struct Reader<R> {
-    inner: R,
-    line_no: u64,
-    buf: String,
-}
-
-#[derive(Debug)]
-pub struct LineError {
-    pub line_no: u64,
-    pub message: String,
-}
-
-impl<R: std::io::BufRead> Reader<R> {
-    pub fn new(inner: R) -> Self {
-        Self {
-            inner,
-            line_no: 0,
-            buf: String::new(),
-        }
-    }
-}
-
-impl<R: std::io::BufRead> Iterator for Reader<R> {
-    type Item = Result<Point, LineError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            self.buf.clear();
-            let start = self.line_no + 1;
-            match self.inner.read_line(&mut self.buf) {
-                Ok(0) => return None,
-                Ok(_) => self.line_no += 1,
-                Err(e) => {
-                    return Some(Err(LineError {
-                        line_no: start,
-                        message: e.to_string(),
-                    }));
-                }
-            }
-            let trimmed = self.buf.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            loop {
-                match parse_line(&self.buf, 0) {
-                    Ok(p) => return Some(Ok(p)),
-                    Err(ParseError::Unterminated) => match self.inner.read_line(&mut self.buf) {
-                        Ok(0) => {
-                            return Some(Err(LineError {
-                                line_no: start,
-                                message: "unterminated string at end of input".into(),
-                            }));
-                        }
-                        Ok(_) => self.line_no += 1,
-                        Err(e) => {
-                            return Some(Err(LineError {
-                                line_no: start,
-                                message: e.to_string(),
-                            }));
-                        }
-                    },
-                    Err(ParseError::Invalid(message)) => {
-                        return Some(Err(LineError {
-                            line_no: start,
-                            message,
-                        }));
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -349,18 +281,6 @@ mod tests {
         let p = parse_line("m a=1,b=t,c=F", 9).unwrap();
         assert_eq!(p.time, 9);
         assert_eq!(p.fields[1].1, FieldValue::Bool(true));
-    }
-
-    #[test]
-    fn reader_skips_comments_and_joins_multiline_strings() {
-        let input = "# DDL\n\nm s=\"a\nb\" 1\nm v=2 2\nbroken\n";
-        let mut r = Reader::new(std::io::Cursor::new(input));
-        let p = r.next().unwrap().unwrap();
-        assert_eq!(p.fields[0].1, FieldValue::Str("a\nb".into()));
-        assert_eq!(r.next().unwrap().unwrap().time, 2);
-        let e = r.next().unwrap().unwrap_err();
-        assert_eq!(e.line_no, 6);
-        assert!(r.next().is_none());
     }
 
     #[test]

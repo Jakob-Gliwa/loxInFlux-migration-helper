@@ -19,7 +19,7 @@ Typical sequence:\n  \
 4. cutover   - swap bucket names (check mode by default; --execute --yes to act)\n\n\
 The source bucket is never modified. stdout carries one result (use --output json for machines),\n\
 stderr carries logs. Exit codes: 0 ok, 1 internal, 2 usage, 3 connection, 4 auth, 5 not found,\n\
-6 write rejected, 7 verify mismatch, 8 refused.",
+6 write rejected, 7 verify mismatch, 8 refused, 9 resource limit.",
     after_help = "Docs: https://github.com/Jakob-Gliwa/loxInFlux-migrationshelper"
 )]
 pub struct Cli {
@@ -31,7 +31,7 @@ pub struct Cli {
 
 #[derive(Args)]
 pub struct Global {
-    /// InfluxDB v2 base URL.
+    /// InfluxDB v2 base URL (the source; also the target unless --target-url is set).
     #[arg(
         long,
         env = "INFLUX_URL",
@@ -51,6 +51,20 @@ pub struct Global {
     /// Organisation name.
     #[arg(long, env = "INFLUX_ORG", default_value = "", global = true)]
     pub org: String,
+    /// Target InfluxDB for migrate/verify, if it is another server. Default: --url.
+    #[arg(long, env = "INFLUX_TARGET_URL", global = true)]
+    pub target_url: Option<String>,
+    /// Token for --target-url. Default: --token.
+    #[arg(
+        long,
+        env = "INFLUX_TARGET_TOKEN",
+        hide_env_values = true,
+        global = true
+    )]
+    pub target_token: Option<String>,
+    /// Organisation on --target-url. Default: --org.
+    #[arg(long, env = "INFLUX_TARGET_ORG", global = true)]
+    pub target_org: Option<String>,
     /// Result format on stdout.
     #[arg(
         long,
@@ -72,9 +86,20 @@ pub struct Global {
     /// Log level (error, warn, info, debug, trace) or a tracing filter.
     #[arg(long, env = "LMH_LOG_LEVEL", default_value = "info", global = true)]
     pub log_level: String,
-    /// HTTP timeout per request in seconds (queries of one shard window must finish within it).
+    /// HTTP timeout per request in seconds (one window's query must finish within it).
     #[arg(long, env = "LMH_TIMEOUT_SECS", default_value_t = 900, global = true)]
     pub timeout_secs: u64,
+    /// Concurrent queries (windows read in parallel).
+    #[arg(long, env = "LMH_PARALLEL", default_value_t = 2, global = true)]
+    pub parallel: usize,
+    /// Abort cleanly (exit 9) if this process uses more resident memory than this (Linux).
+    #[arg(
+        long,
+        env = "LMH_MEMORY_LIMIT_MB",
+        default_value_t = 512,
+        global = true
+    )]
+    pub memory_limit_mb: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -85,7 +110,7 @@ pub enum LogFormat {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Read-only inventory: field types per shard window, conflicts, string values.
+    /// Read-only inventory: field types per window, conflicts, string values.
     Analyze(AnalyzeArgs),
     /// Copy a bucket (or a line protocol export) into a target bucket, converting values.
     Migrate(MigrateArgs),
@@ -108,6 +133,9 @@ pub struct Range {
     /// Only these measurements (repeatable). Default: all.
     #[arg(long = "measurement", value_name = "NAME")]
     pub measurements: Vec<String>,
+    /// Query window (e.g. 1d, 6h). Must divide one day; default is shard-safe (1d for day-based shards).
+    #[arg(long)]
+    pub window: Option<String>,
 }
 
 #[derive(Args)]
@@ -172,12 +200,13 @@ pub struct MigrateArgs {
     /// Bucket to write to.
     #[arg(long)]
     pub target_bucket: String,
-    /// Read from an `influxd inspect export-lp` file instead of the API (`-` = stdin).
+    /// Read line protocol, e.g. `influxd inspect export-lp ... --output-path -`, from a file (`-` = stdin).
     #[arg(long, value_name = "FILE", conflicts_with = "source_bucket")]
     pub from_lp: Option<PathBuf>,
-    /// Time range and measurement filter (API source only).
+    /// Start of the time range (API source).
     #[arg(long, required_unless_present = "from_lp")]
     pub start: Option<String>,
+    /// End of the time range (API source).
     #[arg(long, default_value = "now")]
     pub stop: String,
     /// Only these measurements (repeatable). Others are NOT copied. Default: all.
@@ -186,24 +215,42 @@ pub struct MigrateArgs {
     /// Convert only points with this tag (repeatable, OR), e.g. application=loxInFlux. Other points are copied unchanged.
     #[arg(long = "convert-where-tag", value_name = "KEY=VALUE")]
     pub convert_where_tag: Vec<String>,
+    /// Query window / verify granularity (e.g. 1d, 6h). Default is shard-safe.
+    #[arg(long)]
+    pub window: Option<String>,
     /// Create the target bucket (same retention and shard group duration as the source) if it is missing.
     #[arg(long)]
     pub create_target: bool,
     /// Read and convert, but write nothing. Uses its own state file.
     #[arg(long)]
     pub dry_run: bool,
-    /// Checkpoint file. Default: ./lmh-state-<source>-to-<target>[-dry-run].json
+    /// Checkpoint file. Default: ./lmh-state-<source>-to-<target>[-dry-run].jsonl
     #[arg(long)]
     pub state: Option<PathBuf>,
-    /// Redo windows the state file marks as finished.
+    /// Redo windows the state file marks as finished (within --start/--stop).
     #[arg(long)]
     pub redo: bool,
+    /// Parallel write requests.
+    #[arg(long, env = "LMH_WRITERS", default_value_t = 2)]
+    pub writers: usize,
     /// Field values per write request.
-    #[arg(long, default_value_t = 5000)]
-    pub batch_size: usize,
-    /// Pause after each write request, to spare a busy server.
-    #[arg(long, default_value_t = 0)]
-    pub pause_ms: u64,
+    #[arg(long, default_value_t = 10_000)]
+    pub batch_size: u64,
+    /// Maximum uncompressed size of one write request, in MiB.
+    #[arg(long, default_value_t = 4)]
+    pub batch_mb: usize,
+    /// Limit the write rate in field values per second (0 = unlimited).
+    #[arg(long, env = "LMH_MAX_RATE", default_value_t = 0)]
+    pub max_rate: u64,
+    /// Send uncompressed (saves CPU on both sides when InfluxDB is local).
+    #[arg(long)]
+    pub no_gzip: bool,
+    /// Pause writes while InfluxDB's Go heap is this many MiB above its value at start (0 = off).
+    #[arg(long, env = "LMH_INFLUX_HEAP_HEADROOM_MB", default_value_t = 1024)]
+    pub influx_heap_headroom_mb: u64,
+    /// Give up (exit 9) if writes stay paused by the InfluxDB memory guard this long.
+    #[arg(long, default_value_t = 600)]
+    pub max_pause_secs: u64,
     /// What to do when InfluxDB rejects a batch.
     #[arg(long, value_enum, default_value = "abort")]
     pub on_reject: OnReject,

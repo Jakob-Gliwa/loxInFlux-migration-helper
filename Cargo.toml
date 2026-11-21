@@ -12,10 +12,13 @@ categories = ["command-line-utilities", "database"]
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
+crossbeam-channel = "0.5"
 csv = "1"
 flate2 = "1"
+itoa = "1"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
 ryu = "1"

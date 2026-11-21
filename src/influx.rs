@@ -3,12 +3,10 @@
 use crate::error::{Kind, fail};
 use crate::window::default_shard_duration_secs;
 use anyhow::Context as _;
-use flate2::{Compression, write::GzEncoder};
 use reqwest::blocking::{Client as Http, RequestBuilder, Response};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::io::Write as _;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -334,26 +332,44 @@ impl Client {
         )
     }
 
-    /// Write line protocol (nanosecond precision), gzip-compressed, retrying
-    /// transient failures with exponential backoff.
-    pub fn write(&self, bucket: &str, lines: &str) -> anyhow::Result<()> {
-        let mut gz = GzEncoder::new(Vec::with_capacity(lines.len() / 4), Compression::fast());
-        gz.write_all(lines.as_bytes())?;
-        let body = gz.finish()?;
+    /// Go heap in use of the server (from /metrics), if exposed.
+    pub fn heap_inuse_bytes(&self) -> Option<u64> {
+        let text = self
+            .http
+            .get(format!("{}/metrics", self.base))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .ok()?
+            .text()
+            .ok()?;
+        text.lines()
+            .find(|l| l.starts_with("go_memstats_heap_inuse_bytes "))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<f64>()
+            .ok()
+            .map(|v| v as u64)
+    }
+
+    /// Write a line protocol body (nanosecond precision), retrying transient
+    /// failures with exponential backoff. `body` is cheap to clone.
+    pub fn write_body(&self, bucket: &str, body: bytes::Bytes, gzip: bool) -> anyhow::Result<()> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let rb = self
+            let mut rb = self
                 .req(Method::POST, "/api/v2/write")
                 .query(&[
                     ("org", self.org.as_str()),
                     ("bucket", bucket),
                     ("precision", "ns"),
                 ])
-                .header("Content-Encoding", "gzip")
                 .header("Content-Type", "text/plain; charset=utf-8")
                 .body(body.clone());
-            let (retryable, reason, wait) = match rb.send() {
+            if gzip {
+                rb = rb.header("Content-Encoding", "gzip");
+            }
+            let (reason, wait) = match rb.send() {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(resp) => {
                     let status = resp.status();
@@ -368,7 +384,7 @@ impl Client {
                         | StatusCode::INTERNAL_SERVER_ERROR
                         | StatusCode::BAD_GATEWAY
                         | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT => (true, format!("{status} {msg}"), wait),
+                        | StatusCode::GATEWAY_TIMEOUT => (format!("{status} {msg}"), wait),
                         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                             return Err(fail(
                                 Kind::Auth,
@@ -391,9 +407,9 @@ impl Client {
                         }
                     }
                 }
-                Err(e) => (true, e.to_string(), None),
+                Err(e) => (e.to_string(), None),
             };
-            if !retryable || attempt > self.write_retries {
+            if attempt > self.write_retries {
                 return Err(fail(
                     Kind::Connection,
                     format!("writing to `{bucket}` failed after {attempt} attempts: {reason}"),

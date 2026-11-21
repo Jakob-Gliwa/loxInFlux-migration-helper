@@ -11,7 +11,7 @@ agents that **change** its code.
   everything else (logs, progress) is on stderr. Schema: [docs/output.md](docs/output.md).
 * Decide by `exit_code` / `error.kind`, not by parsing text:
   `0` ok · `2 usage` · `3 connection` · `4 auth` · `5 not_found` ·
-  `6 write_rejected` · `7 verify_mismatch` · `8 refused` · `1 internal`.
+  `6 write_rejected` · `7 verify_mismatch` · `8 refused` · `9 resource_limit` · `1 internal`.
 * `error.hint` says what to change; `next_steps` holds copy-ready follow-up
   commands. They are suggestions — check them against the user's goal.
 * Configure via environment, never interactively: `INFLUX_URL`, `INFLUX_ORG`,
@@ -47,6 +47,9 @@ choice; `verify` will then report extra values as a warning).
 3. With approval: `migrate ... --create-target --output json`.
    * Exit 3 or a timeout: rerun the identical command; finished windows are
      skipped (state file). Do not delete the state file.
+   * Exit 9: a memory guard stopped the run. Rerun with lower `--parallel`,
+     `--writers` or `--batch-mb` (own memory) or wait and/or lower `--writers`
+     (InfluxDB heap). Finished windows are kept.
    * Exit 6: the target already has conflicting types — usually the wrong
      target bucket. Stop and ask.
 4. `verify --state <file> --output json`.
@@ -63,7 +66,9 @@ choice; `verify` will then report extra values as a warning).
 * `--measurement` limits what is copied at all; `--convert-where-tag` limits
   what is converted (the rest is copied unchanged). For a complete migration
   use `--convert-where-tag`, not `--measurement`.
-* A dry run uses its own state file (`…-dry-run.json`); it cannot be verified.
+* A dry run uses its own state file (`…-dry-run.jsonl`); it cannot be verified.
+* On a production server, keep it gentle: `--writers 2` and/or `--max-rate`.
+  The run is CPU-bound on the InfluxDB side.
 
 ## Changing the code
 

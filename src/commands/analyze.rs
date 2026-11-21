@@ -1,14 +1,18 @@
 //! `analyze`: read-only inventory of a bucket, one shard window at a time.
 
-use super::{connect, date, human_duration, sh};
+use super::{Resources, connect, date, human_duration, sh};
 use crate::cli::{AnalyzeArgs, Global};
 use crate::convert::{Action, Rules, convert};
 use crate::flux::{self, for_each_row, lit};
+use crate::guard::{MemWatch, Shared};
+use crate::influx::Client;
 use crate::output::{Outcome, n};
-use crate::window::{parse_time, windows};
+use crate::window::{Window, grid_secs, parse_duration_secs, parse_time, windows};
+use crossbeam_channel::{bounded, unbounded};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -38,6 +42,7 @@ struct Report {
     bucket: String,
     shard_group_secs: i64,
     retention_secs: i64,
+    window_secs: i64,
     start: String,
     stop: String,
     windows: usize,
@@ -50,24 +55,131 @@ struct Report {
     migrate_estimate: BTreeMap<String, u64>,
     strings_classified: bool,
     fields: Vec<FieldReport>,
+    resources: Resources,
 }
 
 const EXAMPLES_PER_ACTION: usize = 3;
 const PAIRS_PER_QUERY: usize = 40;
 
+/// Per action: how many values and up to three examples.
+type ActionStats = BTreeMap<&'static str, (u64, Vec<String>)>;
+
+/// What one window contributed.
+#[derive(Default)]
+struct WindowScan {
+    /// (measurement, field) -> (flux type, values)
+    fields: HashMap<(String, String), (String, u64)>,
+    /// (measurement, field) -> action -> (count, examples)
+    strings: HashMap<(String, String), ActionStats>,
+    string_values: u64,
+}
+
+fn scan_window(
+    client: &Client,
+    bucket: &str,
+    w: Window,
+    measurements: &[String],
+    classify: bool,
+    rules: &Rules,
+) -> anyhow::Result<WindowScan> {
+    let src = flux::source(bucket, w, measurements);
+    let mut scan = WindowScan::default();
+    // Within one shard a field has exactly one type, so grouping is safe.
+    let q = format!(
+        "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1)"
+    );
+    let mut types: HashMap<(String, String), String> = HashMap::new();
+    for_each_row(client.query(&q)?, |h, r| {
+        let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
+        let t = h
+            .index("_value")
+            .and_then(|i| h.types.get(i))
+            .cloned()
+            .unwrap_or_default();
+        types.insert((get("_measurement"), get("_field")), t);
+        Ok(())
+    })?;
+    if types.is_empty() {
+        return Ok(scan);
+    }
+    let q = format!("{src} |> count() |> group(columns: [\"_measurement\", \"_field\"]) |> sum()");
+    for_each_row(client.query(&q)?, |h, r| {
+        let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
+        let key = (get("_measurement"), get("_field"));
+        let count: u64 = get("_value").parse().unwrap_or(0);
+        let t = types.get(&key).cloned().unwrap_or_else(|| "unknown".into());
+        let e = scan.fields.entry(key).or_insert((t, 0));
+        e.1 += count;
+        Ok(())
+    })?;
+    if classify {
+        let pairs: Vec<&(String, String)> = types
+            .iter()
+            .filter(|(_, t)| t.as_str() == "string")
+            .map(|(k, _)| k)
+            .collect();
+        for chunk in pairs.chunks(PAIRS_PER_QUERY) {
+            let cond: Vec<String> = chunk
+                .iter()
+                .map(|(m, f)| format!("(r._measurement == {} and r._field == {})", lit(m), lit(f)))
+                .collect();
+            let q = format!(
+                "{} |> filter(fn: (r) => {})",
+                flux::source(bucket, w, &[]),
+                cond.join(" or ")
+            );
+            for_each_row(client.query(&q)?, |h, r| {
+                let Some(p) = flux::row_to_point(h, r)? else {
+                    return Ok(());
+                };
+                let (field, value) = p.fields.into_iter().next().expect("one field per row");
+                let raw = match &value {
+                    crate::convert::FieldValue::Str(s) => s.clone(),
+                    _ => return Ok(()),
+                };
+                scan.string_values += 1;
+                let action = convert(&field, value, rules).action;
+                let e = scan
+                    .strings
+                    .entry((p.measurement, field))
+                    .or_default()
+                    .entry(action.as_str())
+                    .or_default();
+                e.0 += 1;
+                if e.1.len() < EXAMPLES_PER_ACTION && !e.1.contains(&raw) {
+                    e.1.push(raw);
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok(scan)
+}
+
 pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
-    let client = connect(g)?;
+    let shared = Arc::new(Shared::default());
+    let mem = MemWatch::start(g.memory_limit_mb, shared.clone());
+    let client = Arc::new(connect(g)?);
     let bucket = client.bucket(&a.bucket)?;
     let start = parse_time(&a.range.start)?;
     let stop = parse_time(&a.range.stop)?;
-    let ws = windows(start, stop, bucket.shard_group_secs);
+    let requested = a
+        .range
+        .window
+        .as_deref()
+        .map(parse_duration_secs)
+        .transpose()?;
+    let grid = grid_secs(bucket.shard_group_secs, requested)?;
+    let ws = windows(start, stop, grid);
     info!(
         bucket = %bucket.name,
         windows = ws.len(),
+        window = %human_duration(grid),
         shard_group = %human_duration(bucket.shard_group_secs),
         start = %date(start),
         stop = %date(stop),
         classify_strings = a.classify_strings,
+        parallel = g.parallel,
         "analyze started"
     );
     let rules = Rules::default();
@@ -75,104 +187,105 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
     let mut windows_with_data = 0;
     let began = Instant::now();
 
-    for (i, w) in ws.iter().enumerate() {
-        let src = flux::source(&bucket.name, *w, &a.range.measurements);
-        // Within one shard a field has exactly one type, so grouping is safe.
-        let mut types: HashMap<(String, String), String> = HashMap::new();
-        let q = format!(
-            "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1)"
-        );
-        for_each_row(client.query(&q)?, |h, r| {
-            let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
-            let t = h
-                .index("_value")
-                .and_then(|i| h.types.get(i))
-                .cloned()
-                .unwrap_or_default();
-            types.insert((get("_measurement"), get("_field")), t);
-            Ok(())
-        })?;
-        if types.is_empty() {
-            debug!(window = format!("{}/{}", i + 1, ws.len()), start = %date(w.start), "window empty");
-            continue;
-        }
-        windows_with_data += 1;
-        let q =
-            format!("{src} |> count() |> group(columns: [\"_measurement\", \"_field\"]) |> sum()");
-        let mut window_values = 0u64;
-        for_each_row(client.query(&q)?, |h, r| {
-            let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("").to_owned();
-            let key = (get("_measurement"), get("_field"));
-            let count: u64 = get("_value").parse().unwrap_or(0);
-            window_values += count;
-            let t = types.get(&key).cloned().unwrap_or_else(|| "unknown".into());
-            let f = fields.entry(key.clone()).or_insert_with(|| FieldReport {
-                measurement: key.0.clone(),
-                field: key.1.clone(),
-                ..Default::default()
-            });
-            f.values += count;
-            let ts = f.types.entry(type_name(&t)).or_default();
-            ts.values += count;
-            ts.windows += 1;
-            if ts.first_window.is_empty() {
-                ts.first_window = date(w.start);
-            }
-            ts.last_window = date(w.start);
-            Ok(())
-        })?;
-
-        let mut window_strings = 0u64;
-        if a.classify_strings {
-            let pairs: Vec<&(String, String)> = types
-                .iter()
-                .filter(|(_, t)| t.as_str() == "string")
-                .map(|(k, _)| k)
-                .collect();
-            for chunk in pairs.chunks(PAIRS_PER_QUERY) {
-                let cond: Vec<String> = chunk
-                    .iter()
-                    .map(|(m, f)| {
-                        format!("(r._measurement == {} and r._field == {})", lit(m), lit(f))
-                    })
-                    .collect();
-                let q = format!(
-                    "{} |> filter(fn: (r) => {})",
-                    flux::source(&bucket.name, *w, &[]),
-                    cond.join(" or ")
-                );
-                for_each_row(client.query(&q)?, |h, r| {
-                    let Some(p) = flux::row_to_point(h, r)? else {
-                        return Ok(());
-                    };
-                    let (field, value) = p.fields.into_iter().next().expect("one field per row");
-                    let raw = match &value {
-                        crate::convert::FieldValue::Str(s) => s.clone(),
-                        _ => return Ok(()),
-                    };
-                    window_strings += 1;
-                    let action = convert(&field, value, &rules).action;
-                    let f = fields
-                        .entry((p.measurement.clone(), field.clone()))
-                        .or_default();
-                    *f.string_actions.entry(action.as_str().into()).or_default() += 1;
-                    let ex = f.string_examples.entry(action.as_str().into()).or_default();
-                    if ex.len() < EXAMPLES_PER_ACTION && !ex.contains(&raw) {
-                        ex.push(raw);
+    let (job_tx, job_rx) = bounded::<usize>(ws.len().max(1));
+    for i in 0..ws.len() {
+        let _ = job_tx.send(i);
+    }
+    drop(job_tx);
+    let (res_tx, res_rx) = unbounded::<(usize, anyhow::Result<WindowScan>)>();
+    let mut done = 0usize;
+    let mut last_log = Instant::now();
+    std::thread::scope(|s| {
+        for _ in 0..g.parallel.max(1).min(ws.len()) {
+            let (job_rx, res_tx, client, shared, rules, ws, bucket) = (
+                job_rx.clone(),
+                res_tx.clone(),
+                &client,
+                &shared,
+                &rules,
+                &ws,
+                &bucket.name,
+            );
+            let (measurements, classify) = (&a.range.measurements, a.classify_strings);
+            s.spawn(move || {
+                for i in job_rx.iter() {
+                    if shared.aborted() {
+                        break;
                     }
-                    Ok(())
-                })?;
+                    let r = scan_window(client, bucket, ws[i], measurements, classify, rules);
+                    let failed = r.is_err();
+                    let _ = res_tx.send((i, r));
+                    if failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(res_tx);
+        for (i, r) in res_rx.iter() {
+            let scan = match r {
+                Ok(x) => x,
+                Err(e) => {
+                    shared.fail(e);
+                    break;
+                }
+            };
+            done += 1;
+            let w = ws[i];
+            if scan.fields.is_empty() {
+                debug!(start = %date(w.start), "window empty");
+            } else {
+                windows_with_data += 1;
+                let wdate = date(w.start);
+                for ((m, f), (t, count)) in scan.fields {
+                    let entry =
+                        fields
+                            .entry((m.clone(), f.clone()))
+                            .or_insert_with(|| FieldReport {
+                                measurement: m,
+                                field: f,
+                                ..Default::default()
+                            });
+                    entry.values += count;
+                    let ts = entry.types.entry(type_name(&t)).or_default();
+                    ts.values += count;
+                    ts.windows += 1;
+                    if ts.first_window.is_empty() || wdate < ts.first_window {
+                        ts.first_window.clone_from(&wdate);
+                    }
+                    if wdate > ts.last_window {
+                        ts.last_window.clone_from(&wdate);
+                    }
+                }
+                for (key, actions) in scan.strings {
+                    let entry = fields.entry(key).or_default();
+                    for (action, (c, ex)) in actions {
+                        *entry.string_actions.entry(action.into()).or_default() += c;
+                        let e = entry.string_examples.entry(action.into()).or_default();
+                        for x in ex {
+                            if e.len() < EXAMPLES_PER_ACTION && !e.contains(&x) {
+                                e.push(x);
+                            }
+                        }
+                    }
+                }
+            }
+            if last_log.elapsed().as_secs() >= 30 {
+                info!(
+                    windows_done = format!("{done}/{}", ws.len()),
+                    fields = fields.len(),
+                    rss_mib = crate::guard::rss_bytes().map(|b| b >> 20),
+                    "analyze progress"
+                );
+                last_log = Instant::now();
             }
         }
-        info!(
-            window = format!("{}/{}", i + 1, ws.len()),
-            start = %date(w.start),
-            fields = types.len(),
-            values = window_values,
-            string_values_classified = window_strings,
-            elapsed_secs = began.elapsed().as_secs(),
-            "window analyzed"
-        );
+    });
+    mem.stop();
+    if shared.aborted() {
+        return Err(shared
+            .take_reason()
+            .unwrap_or_else(crate::guard::aborted_error));
     }
 
     let mut values_by_type: BTreeMap<String, u64> = BTreeMap::new();
@@ -208,6 +321,7 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
         bucket: bucket.name.clone(),
         shard_group_secs: bucket.shard_group_secs,
         retention_secs: bucket.retention_secs,
+        window_secs: grid,
         start: date(start),
         stop: date(stop),
         windows: ws.len(),
@@ -219,6 +333,11 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
         migrate_estimate: estimate,
         strings_classified: a.classify_strings,
         fields: list,
+        resources: Resources {
+            peak_rss_mib: mem.peak_mib(),
+            memory_limit_mib: mem.limit_bytes >> 20,
+            ..Default::default()
+        },
     };
     info!(
         values = report.values_total,

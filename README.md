@@ -68,7 +68,7 @@ loxinflux-migrationshelper migrate --source-bucket loxinflux --target-bucket lox
   --start 2023-01-01 --convert-where-tag application=loxInFlux --create-target
 
 # 4. Compare what was written with what the target holds, window by window.
-loxinflux-migrationshelper verify --state lmh-state-loxinflux-to-loxinflux_v2.json
+loxinflux-migrationshelper verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl
 
 # 5. Swap names so dashboards that use the bucket name see the migrated data.
 loxinflux-migrationshelper cutover --source-bucket loxinflux --target-bucket loxinflux_v2      # plan only
@@ -115,21 +115,48 @@ omit it for a complete move.
 
 ## How it works and what it guarantees
 
-* **One shard group per query.** Windows are aligned to the source bucket's shard
-  group duration, so every query sees exactly one type per field.
+* **Shard-safe windows.** Data is read in windows of one day (or `--window`,
+  which must divide a day). Shard groups start at whole days for every shard
+  duration that is a multiple of a day — including durations the bucket used
+  in the past and no longer reports — so a window never spans two shards with
+  different field types.
 * **The source is read-only.** Source and target must differ (exit code 8 otherwise).
-* **Resumable and idempotent.** After each window the checkpoint file
-  (`lmh-state-<source>-to-<target>.json`) is replaced atomically. A rerun skips
-  finished windows; rewriting a window overwrites identical points (same series,
-  timestamp and field), so nothing is duplicated. `--redo` with a
+* **Resumable and idempotent.** A window is appended to the checkpoint file
+  (`lmh-state-<source>-to-<target>.jsonl`) only after InfluxDB acknowledged
+  every batch of it. A rerun skips finished windows; rewriting a window
+  overwrites identical points, so nothing is duplicated. `--redo` with a
   `--start/--stop` range re-migrates selected windows.
 * **Verifiable.** `migrate` records how many values it wrote per window and
   measurement; `verify` counts what the target holds and reports gaps. Extra
-  values (e.g. live data already arriving in the target) are reported as a
-  warning, not an error.
-* **Gentle on the server.** Writes are gzip-compressed batches (`--batch-size`,
-  default 5000 values) with retries and backoff on 429/5xx; `--pause-ms` adds
-  a pause between requests.
+  values (e.g. live data already arriving in the target) are a warning, not an error.
+* **Bounded memory, guarded InfluxDB.** See below.
+
+## Speed and memory
+
+Readers convert without per-row allocations: a Flux table (one series and
+field) is turned into its line prefix once, then each row only appends value
+and timestamp; line protocol lines that need no change are copied verbatim.
+`--parallel` windows are read at once, `--writers` requests are in flight.
+
+Measured on a 4-core home server (InfluxDB 2.9, real loxInFlux data, 7.9 M values):
+
+| Step | Values/s | Tool CPU | Tool RAM |
+|---|---|---|---|
+| read via Flux API, `--parallel 4` | ~340 000 | 0.7 core | 45 MiB |
+| read via `export-lp` pipe | ~500 000 | 0.7 core | 26 MiB |
+| full migration (`export-lp` -> write), `--writers 4 --no-gzip` | ~125 000 | 0.25 core | 50–90 MiB |
+
+Writing is limited by InfluxDB's ingestion (the host was 90–95 % busy, almost
+all of it InfluxDB). Plan roughly 2 hours per billion values on such a machine,
+and use `--max-rate` to keep the server responsive for other services.
+
+Memory is bounded by construction — a fixed pool of
+`(parallel + writers) × 2` buffers of `--batch-mb` (default 4 MiB) — and
+enforced: above `--memory-limit-mb` (default 512) the run stops cleanly with
+exit code 9 and can be resumed. On the server side, writes pause while
+InfluxDB's Go heap is more than `--influx-heap-headroom-mb` (default 1024)
+above its value at start, and resume when it has settled; if it does not
+settle within `--max-pause-secs` the run stops with exit code 9.
 
 ### From an export file instead of the API
 
@@ -137,11 +164,22 @@ If you have shell access to the InfluxDB host, `influxd inspect export-lp`
 reads the storage files directly, which is faster for large buckets:
 
 ```sh
-influxd inspect export-lp --bucket-id <id> --engine-path /var/lib/influxdb2/engine --output-path bucket.lp
-loxinflux-migrationshelper migrate --from-lp bucket.lp --target-bucket loxinflux_v2 --create-target
+# stream it, nothing lands on disk (the export of a large bucket is many times its size)
+docker exec influxdb influxd inspect export-lp --bucket-id <id> \
+    --engine-path /var/lib/influxdb2/engine --output-path - --log-level error </dev/null \
+  | loxinflux-migrationshelper migrate --from-lp - --target-bucket loxinflux_v2 --create-target \
+      --convert-where-tag application=loxInFlux
 ```
 
-Counts are recorded per target shard window, so `verify` works the same way.
+Counts are recorded per day window, so `verify` works the same way. A
+stream cannot be resumed half-way; if it is interrupted, run it again
+(rewriting is idempotent) or restrict the export with `--start/--end`.
+
+### Another server
+
+`--target-url`, `--target-token`, `--target-org` (or `INFLUX_TARGET_*`) send
+the migrated data to a different InfluxDB — useful for a rehearsal on a
+throwaway instance with real data.
 
 ### Cutover and what still points at the old bucket
 
@@ -176,13 +214,15 @@ The old bucket stays as `<source>_pre_migration` until you delete it.
 | 6    | `write_rejected` | InfluxDB rejected points (e.g. `field type conflict`)      |
 | 7    | `verify_mismatch`| the target holds fewer values than were migrated           |
 | 8    | `refused`        | unsafe request (same bucket, `--execute` without `--yes`)  |
+| 9    | `resource_limit` | memory guard stopped the run (own RSS, InfluxDB heap)      |
 
 ## Limits
 
 * InfluxDB **v2** (OSS 2.x; tested with 2.9). Not for 1.x or 3.x.
-* API reads stream each shard window as CSV; one window must finish within
-  `--timeout-secs` (default 900). Raise it for very dense buckets, or use the
-  export-file mode.
+* API reads stream each window as CSV; one window must finish within
+  `--timeout-secs` (default 900). Use a smaller `--window` for very dense buckets.
+* Shard durations that are not a multiple of the window (e.g. a bucket that
+  once used 1h shards and now uses 1d) need `--window 1h`.
 * Points that InfluxDB already rejected in the past (type conflicts under 0.3)
   are not in the source and cannot be recovered.
 

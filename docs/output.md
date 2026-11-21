@@ -19,7 +19,10 @@ Every command prints exactly one object to stdout:
 * `status` is `ok` or `error`; `exit_code` equals the process exit code.
 * `error` is present only when `status` is `error`. `kind` is one of
   `usage`, `connection`, `auth`, `not_found`, `write_rejected`,
-  `verify_mismatch`, `refused`, `internal`.
+  `verify_mismatch`, `refused`, `resource_limit`, `internal`.
+* `analyze`, `migrate` and `verify` results contain `resources`:
+  `peak_rss_mib`, `memory_limit_mib`, and for migrate `influx_heap_start_mib`,
+  `influx_heap_peak_mib`, `influx_paused_secs` (when the InfluxDB guard is active).
 * `result` can be present **together with** `error` — e.g. `verify` reports the
   gaps it found and exits with 7. If the command failed before producing a
   result, `result` is absent.
@@ -49,7 +52,7 @@ Every command prints exactly one object to stdout:
 | `input_types` | type → values read |
 | `actions` | action → values |
 | `write_requests`, `rejected_batches` | HTTP writes; rejected batches (only with `--on-reject skip`) |
-| `elapsed_secs`, `rules`, `convert_where_tag` | |
+| `elapsed_secs`, `values_per_sec`, `window_secs`, `rules`, `convert_where_tag` | |
 
 Actions: `float_kept`, `int_to_float`, `unsigned_to_float`, `bool_to_float`,
 `bool_kept`, `string_to_float`, `string_with_unit_to_float`,
@@ -83,8 +86,10 @@ Actions: `float_kept`, `int_to_float`, `unsigned_to_float`, `bool_to_float`,
 
 ## State file
 
-`migrate` writes `lmh-state-<source>-to-<target>[-dry-run].json`:
-`version` (1), `source`, `target`, `dry_run`, `file_points_done` (export-file
-mode), and `windows`: window start in ns (as string key) →
-`{stop_ns, values_read, values_written, values_dropped, rejected_batches,
-written_by_measurement, finished_at}`.
+`migrate` writes `lmh-state-<source>-to-<target>[-dry-run].jsonl` (JSON lines):
+a header `{"kind":"header","version":2,"source","target","dry_run","window_secs"}`,
+then one line per finished window `{"kind":"window","start_ns","stop_ns",
+"values_read","values_written","values_dropped","rejected_batches",
+"written_by_measurement","finished_at"}`. After `--redo` a window can appear
+again; the last line wins. In line protocol mode `values_read` and
+`values_dropped` are 0 per window (totals are in the migrate result).

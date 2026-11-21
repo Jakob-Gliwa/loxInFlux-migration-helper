@@ -2,10 +2,15 @@ mod cli;
 mod commands;
 mod convert;
 mod error;
+mod fast;
+mod fastcsv;
+mod fastlp;
 mod flux;
+mod guard;
 mod influx;
 mod lp;
 mod output;
+mod pipeline;
 mod state;
 mod window;
 

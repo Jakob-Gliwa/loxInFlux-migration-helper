@@ -56,7 +56,7 @@ check "migrate: out-of-scope point copied" "grep -q '\"copied_unchanged\": 1' m.
 L --output json migrate --source-bucket src --target-bucket dst "${R[@]}" "${SCOPE[@]}" > r.json 2>/dev/null
 check "rerun: resumes, nothing to do" "grep -q '\"windows_migrated_now\": 0' r.json"
 
-L --output json verify --state lmh-state-src-to-dst.json > v.json 2>/dev/null; rc=$?
+L --output json verify --state lmh-state-src-to-dst.jsonl > v.json 2>/dev/null; rc=$?
 check "verify: exit 0" "[ $rc = 0 ] && grep -q '\"missing_total\": 0' v.json"
 
 AQ='from(bucket:"dst")|>range(start:2023-01-01T00:00:00Z)|>filter(fn:(r)=>r._measurement=="Temperatur" and r._field=="AQ")'
@@ -73,10 +73,10 @@ check "conflict in target: exit 6" "[ $rc = 6 ] && grep -q 'field type conflict'
 
 curl -s -o /dev/null -XPOST "$INFLUX_URL/api/v2/delete?org=$INFLUX_ORG&bucket=dst" -H "$H" -H 'Content-Type: application/json' \
   --data '{"start":"2023-01-01T00:00:00Z","stop":"2025-01-01T00:00:00Z","predicate":"_measurement=\"Alarm\""}'
-L --output json verify --state lmh-state-src-to-dst.json > v2.json 2>/dev/null; rc=$?
+L --output json verify --state lmh-state-src-to-dst.jsonl > v2.json 2>/dev/null; rc=$?
 check "verify detects deleted values: exit 7" "[ $rc = 7 ] && grep -q '\"Alarm\": 1' v2.json"
 L migrate --source-bucket src --target-bucket dst --start 2023-11-09T00:00:00Z --stop 2023-11-16T00:00:00Z --redo "${SCOPE[@]}" >/dev/null 2>&1
-L verify --state lmh-state-src-to-dst.json >/dev/null 2>&1; rc=$?
+L verify --state lmh-state-src-to-dst.jsonl >/dev/null 2>&1; rc=$?
 check "redo of one window repairs it" "[ $rc = 0 ]"
 
 SRC_ID=$(id_of "buckets?name=src&org=$INFLUX_ORG")
@@ -85,13 +85,19 @@ if [ -n "${LMH_E2E_CONTAINER:-}" ]; then
   docker cp "$LMH_E2E_CONTAINER:/tmp/src.lp" src.lp
   L --output json migrate --from-lp src.lp --target-bucket dst2 --create-target "${SCOPE[@]}" > f.json 2>/dev/null; rc=$?
   check "export-lp file: exit 0, 9 written" "[ $rc = 0 ] && grep -q '\"values_written\": 9' f.json"
-  L verify --state lmh-state-file_src_lp-to-dst2.json >/dev/null 2>&1; rc=$?
+  L verify --state lmh-state-file_src_lp-to-dst2.jsonl >/dev/null 2>&1; rc=$?
   check "export-lp file: verify exit 0" "[ $rc = 0 ]"
+  docker exec "$LMH_E2E_CONTAINER" influxd inspect export-lp --bucket-id "$SRC_ID" --engine-path /var/lib/influxdb2/engine --output-path - --log-level error \
+    | L --output json migrate --from-lp - --target-bucket dst3 --create-target "${SCOPE[@]}" > p.json 2>/dev/null; rc=$?
+  check "export-lp piped via stdin: exit 0, 9 written" "[ $rc = 0 ] && grep -q '\"values_written\": 9' p.json"
 else
   echo "SKIP export-lp file test (set LMH_E2E_CONTAINER)"
 fi
 
-L --log-format json verify --state lmh-state-src-to-dst.json 2> j.err >/dev/null
+L --memory-limit-mb 1 --output json migrate --source-bucket src --target-bucket dst4 "${R[@]}" --create-target --dry-run > mem.json 2>/dev/null; rc=$?
+check "memory watchdog: exit 9 (resource_limit)" "[ $rc = 9 ] && grep -q 'resource_limit' mem.json"
+
+L --log-format json verify --state lmh-state-src-to-dst.jsonl 2> j.err >/dev/null
 check "json logs on stderr" "head -1 j.err | grep -q '^{\"timestamp\"'"
 
 curl -s -o /dev/null -XPOST "$INFLUX_URL/api/v2/authorizations" -H "$H" -H 'Content-Type: application/json' \

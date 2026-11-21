@@ -16,3 +16,10 @@ First release.
 - `cutover`: bucket rename with checks for ID-bound tokens and DBRP mappings.
 - `convert-value`: offline preview of one conversion.
 - `--output json` envelope, `--log-format json`, stable exit codes.
+- Day-aligned windows, safe for shard durations the bucket used in the past.
+- Parallel readers (`--parallel`) and writers (`--writers`) with a bounded
+  buffer pool; allocation-free CSV and line protocol conversion.
+- Memory guards: `--memory-limit-mb` for the tool, `--influx-heap-headroom-mb`
+  pauses writes while InfluxDB's heap is high; exit code 9.
+- `--target-url/--target-token/--target-org`, `--max-rate`, `--no-gzip`,
+  `--from-lp -` (stdin), JSON-lines state file.

@@ -90,6 +90,32 @@ pub enum Action {
 }
 
 impl Action {
+    pub const COUNT: usize = 14;
+    pub const ALL: [Action; Action::COUNT] = [
+        Action::FloatKept,
+        Action::IntToFloat,
+        Action::UnsignedToFloat,
+        Action::BoolToFloat,
+        Action::BoolKept,
+        Action::StringToFloat,
+        Action::StringWithUnitToFloat,
+        Action::StringToTextField,
+        Action::TextFieldKept,
+        Action::StringKept,
+        Action::CopiedUnchanged,
+        Action::DroppedEmpty,
+        Action::DroppedPlaceholder,
+        Action::DroppedNonFinite,
+    ];
+    pub fn index(self) -> usize {
+        self as usize
+    }
+    pub fn is_drop(self) -> bool {
+        matches!(
+            self,
+            Action::DroppedEmpty | Action::DroppedPlaceholder | Action::DroppedNonFinite
+        )
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             Action::FloatKept => "float_kept",
@@ -135,13 +161,14 @@ fn unit_number(text: &str) -> Option<f64> {
     caps.get(1)?.as_str().parse().ok()
 }
 
-enum TextClass {
+pub enum TextClass {
     Number(f64, Action),
     Literal,
     Drop(Action),
 }
 
-fn classify_text(value: &str, rules: &Rules) -> TextClass {
+/// Classify a string value (trimmed) without allocating.
+pub fn classify_text(value: &str, rules: &Rules) -> TextClass {
     let trimmed = value.trim();
     if rules.drop_empty && trimmed.is_empty() {
         return TextClass::Drop(Action::DroppedEmpty);
@@ -345,6 +372,13 @@ mod tests {
         assert_eq!(c("a", s("19.8°")).output, Some(("a".into(), s("19.8°"))));
         assert_eq!(c("a", s("")).action, Action::StringKept);
         assert_eq!(c("a", s("<v.1>")).action, Action::StringKept);
+    }
+
+    #[test]
+    fn action_index_matches_all() {
+        for (i, a) in Action::ALL.iter().enumerate() {
+            assert_eq!(a.index(), i);
+        }
     }
 
     #[test]

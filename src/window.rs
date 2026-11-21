@@ -56,6 +56,51 @@ pub fn default_shard_duration_secs(retention_secs: i64) -> i64 {
     }
 }
 
+fn gcd(a: i64, b: i64) -> i64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Query window length. It must never span two shard groups, including shard
+/// groups created under an earlier, different shard duration that the bucket
+/// no longer reports. Shard groups start at multiples of their duration
+/// counted from 0001-01-01 (Go's zero time), which is a whole number of days
+/// before the Unix epoch; so a grid that divides one day lines up with every
+/// shard duration that is a multiple of it. Default: the largest such grid
+/// that also divides the current shard duration (1 day for 1d/7d/364d shards).
+pub fn grid_secs(shard_secs: i64, requested: Option<i64>) -> anyhow::Result<i64> {
+    let safe = gcd(shard_secs.max(1), 86_400);
+    match requested {
+        None => Ok(safe),
+        Some(r) if r > 0 && 86_400 % r == 0 && shard_secs % r == 0 => Ok(r),
+        Some(r) => Err(fail(
+            Kind::Usage,
+            format!("--window {r}s must divide both one day and the shard group duration ({shard_secs}s)"),
+        )
+        .hint(format!("use {safe}s or a divisor of it, e.g. 6h or 1h"))
+        .into()),
+    }
+}
+
+/// Parse `90s`, `15m`, `6h`, `1d`.
+pub fn parse_duration_secs(s: &str) -> anyhow::Result<i64> {
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: i64 = num
+        .parse()
+        .map_err(|_| fail(Kind::Usage, format!("invalid duration `{s}`")))?;
+    let mult = match unit {
+        "s" | "" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => {
+            return Err(fail(Kind::Usage, format!("invalid duration unit in `{s}`"))
+                .hint("use s, m, h or d")
+                .into());
+        }
+    };
+    Ok(n * mult)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
     pub start: i64,
@@ -110,6 +155,19 @@ mod tests {
             assert_eq!(pair[0].stop, pair[1].start);
         }
         assert!(windows(stop, start, week).is_empty());
+    }
+
+    #[test]
+    fn grid_is_shard_safe() {
+        assert_eq!(grid_secs(604_800, None).unwrap(), 86_400);
+        assert_eq!(grid_secs(8736 * 3600, None).unwrap(), 86_400);
+        assert_eq!(grid_secs(3600, None).unwrap(), 3600);
+        assert_eq!(grid_secs(604_800, Some(21_600)).unwrap(), 21_600);
+        assert!(grid_secs(604_800, Some(172_800)).is_err());
+        assert!(grid_secs(3600, Some(86_400)).is_err());
+        assert_eq!(parse_duration_secs("6h").unwrap(), 21_600);
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86_400);
+        assert!(parse_duration_secs("1w").is_err());
     }
 
     #[test]
