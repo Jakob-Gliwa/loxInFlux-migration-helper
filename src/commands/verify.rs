@@ -84,12 +84,38 @@ fn check(client: &Client, bucket: &str, rec: &WindowRecord) -> anyhow::Result<Wi
         date(rec.stop_ns)
     );
     let mut actual: BTreeMap<String, u64> = BTreeMap::new();
-    for_each_row(client.query(&q)?, |h, r| {
+    let pushed_down = for_each_row(client.query(&q)?, |h, r| {
         let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("");
         *actual.entry(get("_measurement").to_owned()).or_default() +=
             get("_value").parse::<u64>().unwrap_or(0);
         Ok(())
-    })?;
+    });
+    if let Err(e) = pushed_down {
+        // InfluxDB 2.x can panic in the pushed-down count() ("unreachable: <nil>");
+        // count the rows instead.
+        let msg = format!("{e:#}");
+        if !msg.contains("panic") {
+            return Err(e);
+        }
+        warn!(window = %date(rec.start_ns), error = %msg, "InfluxDB failed on count(), counting rows instead");
+        actual.clear();
+        let q = format!(
+            "from(bucket: {}) |> range(start: {}, stop: {}) |> keep(columns: [\"_measurement\"])",
+            lit(bucket),
+            date(rec.start_ns),
+            date(rec.stop_ns)
+        );
+        for_each_row(client.query(&q)?, |h, r| {
+            let m = h.index("_measurement").and_then(|i| r.get(i)).unwrap_or("");
+            match actual.get_mut(m) {
+                Some(c) => *c += 1,
+                None => {
+                    actual.insert(m.to_owned(), 1);
+                }
+            }
+            Ok(())
+        })?;
+    }
     let mut w = WindowResult {
         start: date(rec.start_ns),
         stop: date(rec.stop_ns),
