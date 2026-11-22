@@ -101,7 +101,7 @@ next to InfluxDB with access to its storage directory, compare through the
 storage files instead (`--read-via export-lp`, see
 [verify-export.md](verify-export.md)). A warning about
 `source_values_only_on_disk` means InfluxDB has values on disk that no query
-returns (fields missing from its index). They were invisible before, so the
+returns (fields missing from its index, or values of a conflicting type). They were invisible before, so the
 migration could not copy them. `recover` writes exactly those into the new
 bucket:
 

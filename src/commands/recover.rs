@@ -10,11 +10,10 @@
 //! (measurement, field) pairs that a query returns. export-lp lines of pairs
 //! that are not visible in their window are converted with the migration rules
 //! and written; visible pairs are never written, so nothing the migration
-//! already copied is touched. This also catches values whose stored type
-//! differs from the field's type in that shard (queries skip them too) when a
-//! whole window of a pair is affected. Hidden values inside a pair that is
-//! visible in the same window are not written; `verify --deep --read-via
-//! export-lp` still counts them as `source_values_only_on_disk`.
+//! already copied is touched. Visibility includes the value type: a value
+//! whose stored type differs from the type the query returns for that pair
+//! (left behind by type conflicts; queries skip it) counts as hidden even
+//! when the pair itself is visible.
 
 use super::migrate::parse_scope;
 use super::{Resources, connect, connect_target, date, human_duration, sh};
@@ -46,7 +45,8 @@ use tracing::{info, warn};
 const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 /// (measurement, field) as bytes: unescaped measurement, 0, unescaped field,
-/// decoded like the query API decodes them (invalid UTF-8 replaced).
+/// decoded like the query API decodes them (invalid UTF-8 replaced). The
+/// visible sets append 0 and a value type (see [`value_type`]).
 type PairKey = Vec<u8>;
 
 #[derive(Serialize)]
@@ -163,6 +163,37 @@ fn pair_key_str(measurement: &str, field: &str) -> PairKey {
     k
 }
 
+/// One byte per value type: f(loat), i(nt), u(int), s(tring), b(ool).
+fn value_type(v: &[u8]) -> u8 {
+    match v {
+        [b'"', ..] => b's',
+        b"t" | b"T" | b"true" | b"True" | b"TRUE" | b"f" | b"F" | b"false" | b"False"
+        | b"FALSE" => b'b',
+        [.., b'i'] => b'i',
+        [.., b'u'] => b'u',
+        _ => b'f',
+    }
+}
+
+/// The value type of a Flux `#datatype` annotation; `None` for anything else.
+fn flux_type(datatype: &str) -> Option<u8> {
+    Some(match datatype {
+        "double" => b'f',
+        "long" => b'i',
+        "unsignedLong" => b'u',
+        "string" => b's',
+        "boolean" => b'b',
+        _ => return None,
+    })
+}
+
+fn typed_key(key: &[u8], ty: u8, out: &mut PairKey) {
+    out.clear();
+    out.extend_from_slice(key);
+    out.push(0);
+    out.push(ty);
+}
+
 fn split_key(k: &[u8]) -> (String, String) {
     let (m, f) = match k.iter().position(|b| *b == 0) {
         Some(p) => (&k[..p], &k[p + 1..]),
@@ -174,7 +205,8 @@ fn split_key(k: &[u8]) -> (String, String) {
     )
 }
 
-/// The (measurement, field) pairs the query API returns for one window.
+/// The (measurement, field, value type) triples the query API returns for one
+/// window.
 ///
 /// `first()` is pushed down into the storage engine and returns one row per
 /// series and field, which is cheap. InfluxDB 2.x can panic in that path
@@ -191,32 +223,52 @@ fn visible_pairs(
         let mut set = HashSet::new();
         for_each_row(client.query(q)?, |h, r| {
             let get = |c: &str| h.index(c).and_then(|i| r.get(i)).unwrap_or("");
-            set.insert(pair_key_str(get("_measurement"), get("_field")));
+            let datatype = h
+                .index("_value")
+                .and_then(|i| h.types.get(i))
+                .map_or("", String::as_str);
+            let Some(ty) = flux_type(datatype) else {
+                return Err(fail(
+                    Kind::Internal,
+                    format!("unexpected _value type `{datatype}` in query result"),
+                )
+                .into());
+            };
+            let mut k = Vec::new();
+            typed_key(
+                &pair_key_str(get("_measurement"), get("_field")),
+                ty,
+                &mut k,
+            );
+            set.insert(k);
             Ok(())
         })?;
         Ok(set)
     };
     let fast = format!(
-        "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1) |> keep(columns: [\"_measurement\", \"_field\"])"
+        "{src} |> first() |> group(columns: [\"_measurement\", \"_field\"]) |> limit(n: 1) |> keep(columns: [\"_measurement\", \"_field\", \"_value\"])"
     );
     match collect(&fast) {
         Ok(set) => Ok((set, false)),
         Err(e) if format!("{e:#}").contains("panic") => {
             warn!(window = %date(w.start), error = %format!("{e:#}"), "InfluxDB failed on the pushed-down query, scanning the window's rows instead");
-            let scan = format!("{src} |> keep(columns: [\"_measurement\", \"_field\"])");
+            let scan =
+                format!("{src} |> keep(columns: [\"_measurement\", \"_field\", \"_value\"])");
             Ok((collect(&scan)?, true))
         }
         Err(e) => Err(e),
     }
 }
 
-/// Decides per field whether it is hidden; remembers the last field so the
-/// many consecutive lines of one series and field (export-lp is sorted by
-/// series key) cost one comparison each.
+/// Decides per value whether it is hidden; remembers the last field and type
+/// so the many consecutive lines of one series and field (export-lp is sorted
+/// by series key) cost one comparison each.
 struct Classifier {
     raw: Vec<u8>,
     win: usize,
     key: PairKey,
+    typed: PairKey,
+    ty: u8,
     hidden: bool,
 }
 
@@ -226,15 +278,18 @@ impl Classifier {
             raw: Vec::new(),
             win: usize::MAX,
             key: Vec::new(),
+            typed: Vec::new(),
+            ty: 0,
             hidden: false,
         }
     }
 
-    /// Returns whether the field is hidden in window `win`.
+    /// Returns whether a value of type `ty` is hidden in window `win`.
     fn classify(
         &mut self,
         measurement: &[u8],
         field: &[u8],
+        ty: u8,
         win: usize,
         visible: &HashSet<PairKey>,
     ) -> bool {
@@ -250,7 +305,12 @@ impl Classifier {
             self.raw.extend_from_slice(field);
             self.win = win;
             pair_key(measurement, field, &mut self.key);
-            self.hidden = !visible.contains(self.key.as_slice());
+            self.ty = 0;
+        }
+        if ty != self.ty {
+            typed_key(&self.key, ty, &mut self.typed);
+            self.hidden = !visible.contains(self.typed.as_slice());
+            self.ty = ty;
         }
         self.hidden
     }
@@ -314,10 +374,11 @@ impl<'a> Filter<'a> {
             }
         }
         self.hidden.clear();
-        for (k, ((ks, ke), _)) in self.fields.iter().enumerate() {
+        for (k, ((ks, ke), (vs, ve))) in self.fields.iter().enumerate() {
+            let ty = value_type(&line[*vs..*ve]);
             if self
                 .cls
-                .classify(measurement, &line[*ks..*ke], win, &self.visible[win])
+                .classify(measurement, &line[*ks..*ke], ty, win, &self.visible[win])
             {
                 self.hidden.push(k);
                 let st = &mut self.stats[win];
@@ -940,8 +1001,51 @@ fn read_chunk(
 mod tests {
     use super::*;
 
+    /// Pairs visible with every value type.
     fn set(pairs: &[(&str, &str)]) -> HashSet<PairKey> {
-        pairs.iter().map(|(m, f)| pair_key_str(m, f)).collect()
+        let mut out = HashSet::new();
+        for (m, f) in pairs {
+            for ty in *b"fiusb" {
+                let mut k = Vec::new();
+                typed_key(&pair_key_str(m, f), ty, &mut k);
+                out.insert(k);
+            }
+        }
+        out
+    }
+
+    fn typed(m: &str, f: &str, ty: u8) -> PairKey {
+        let mut k = Vec::new();
+        typed_key(&pair_key_str(m, f), ty, &mut k);
+        k
+    }
+
+    #[test]
+    fn value_types() {
+        assert_eq!(value_type(br#""19.9\xc2\xb0""#), b's');
+        assert_eq!(value_type(b"16i"), b'i');
+        assert_eq!(value_type(b"3u"), b'u');
+        assert_eq!(value_type(b"true"), b'b');
+        assert_eq!(value_type(b"F"), b'b');
+        assert_eq!(value_type(b"-1.5e3"), b'f');
+        assert_eq!(flux_type("double"), Some(b'f'));
+        assert_eq!(flux_type("dateTime:RFC3339"), None);
+    }
+
+    #[test]
+    fn values_of_another_type_are_hidden() {
+        // `a` is visible as float only: its strings and ints are hidden.
+        let vis = [
+            [typed("m", "a", b'f')].into_iter().collect(),
+            HashSet::new(),
+        ];
+        let mut f = Filter::new(&W, &vis, &[]);
+        assert_eq!(f.apply(b"m,t=1 a=1.5 10\n").unwrap(), None);
+        assert!(f.apply(br#"m,t=1 a="19.9" 11"#).unwrap().is_some());
+        assert!(f.apply(b"m,t=1 a=16i 12").unwrap().is_some());
+        assert_eq!(f.apply(b"m,t=1 a=2 13").unwrap(), None);
+        assert_eq!(f.stats[0].hidden_values, 2);
+        assert_eq!(f.stats[0].pairs[&pair_key_str("m", "a")], 2);
     }
 
     const W: [Window; 2] = [

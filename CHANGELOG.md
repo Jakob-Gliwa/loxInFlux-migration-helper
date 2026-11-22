@@ -8,7 +8,9 @@ and the state file format are a public contract (see AGENTS.md).
 - `recover`: copies values that the storage files hold but no query returns
   (fields missing from a shard's field index) into the target, converted with
   the migration rules. Per day window, only (measurement, field) pairs the
-  query API does not return are written; reads one export-lp call per shard
+  query API does not return are written, and values whose stored type differs
+  from the type the query returns for their field (type-conflict leftovers);
+  reads one export-lp call per shard
   group, resumable per chunk, `--dry-run`, JSON result with every hidden pair.
 - e2e test reproduces an invisible field (lost field change log) and recovers it.
 - `verify --read-via export-lp`: a differing window is first re-checked with

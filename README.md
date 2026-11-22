@@ -133,13 +133,15 @@ All options: `loxinflux-migration-helper <command> --help`.
 ## Data that InfluxDB no longer shows
 
 InfluxDB can lose track of fields in its index while the values are still on
-disk. Queries, Grafana and therefore a normal migration then skip them without
-any error. `verify --deep --read-via export-lp` reports such values as
+disk, and after type conflicts it can keep values of the "wrong" type that no
+query returns. Queries, Grafana and therefore a normal migration skip both
+without any error. `verify --deep --read-via export-lp` reports such values as
 `source_values_only_on_disk`.
 
 `recover` copies these values. It reads the storage files with
-`influxd inspect export-lp`, keeps per day only the measurement/field pairs
-that a query does not return, converts them with the same rules and writes
+`influxd inspect export-lp`, keeps per day only the values whose
+measurement, field and type a query does not return, converts them with the
+same rules and writes
 them into the migrated bucket. Values the migration already copied are left
 alone.
 

@@ -61,7 +61,8 @@ two can differ:
 * Points written more than once (for example by a rerun or by `recover`)
   that compaction has not merged yet: export-lp prints every copy, a query
   returns one. Deleted points that compaction has not removed yet.
-* Values of a field that is missing from the shard's field index. In a real
+* Values of a field that is missing from the shard's field index, and values
+  whose stored type differs from the field's type in that shard. In a real
   installation this affected about 12 % of the values in some months after
   earlier type-conflict clean-ups. No query returns such values, so a Flux
   based migration cannot copy them; `recover` can.
