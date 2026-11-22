@@ -1,10 +1,10 @@
 [package]
-name = "loxinflux-migrationshelper"
+name = "loxinflux-migration-helper"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Migrate an InfluxDB v2 bucket written by loxInFlux 0.3 to the float-only schema of loxInFlux 0.5"
-repository = "https://github.com/Jakob-Gliwa/loxInFlux-migrationshelper"
+repository = "https://github.com/Jakob-Gliwa/loxInFlux-migration-helper"
 license = "MIT"
 readme = "README.md"
 keywords = ["influxdb", "loxone", "migration", "loxinflux"]
@@ -22,7 +22,7 @@ flate2 = "1"
 itoa = "1"
 memchr = "2"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "gzip", "json", "query"] }
 ryu = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

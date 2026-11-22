@@ -4,7 +4,7 @@ Every command prints exactly one object to stdout:
 
 ```json
 {
-  "tool": "loxinflux-migrationshelper",
+  "tool": "loxinflux-migration-helper",
   "version": "0.1.0",
   "command": "migrate",
   "status": "ok",
@@ -12,7 +12,7 @@ Every command prints exactly one object to stdout:
   "result": { "...": "command specific, see below" },
   "error": { "kind": "verify_mismatch", "message": "...", "hint": "..." },
   "warnings": ["..."],
-  "next_steps": ["loxinflux-migrationshelper verify --state ..."]
+  "next_steps": ["loxinflux-migration-helper verify --state ..."]
 }
 ```
 

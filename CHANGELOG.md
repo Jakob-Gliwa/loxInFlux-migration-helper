@@ -3,7 +3,7 @@
 All notable changes are listed here. The JSON output, exit codes, action names
 and the state file format are a public contract (see AGENTS.md).
 
-## 0.1.0 - unreleased
+## 0.1.0 - 2026-11-22
 
 First release.
 
@@ -37,3 +37,9 @@ First release.
   ("unreachable: <nil>") by scanning the affected window; errors name the window.
 - Command line errors are JSON with `--output json`; timeouts get a resume hint.
 - SIMD (memchr) scanning in the line protocol path; offline dry run for files.
+- Step-by-step switchover guide (`docs/switchover.md`) and a README written
+  for people doing the migration; recovery of values InfluxDB no longer
+  returns via `export-lp` and `--from-lp`.
+- Name `loxinflux-migration-helper` (binary, image, JSON `tool` field).
+- reqwest 0.13 (rustls, system certificate store); container images carry a
+  CA bundle for https.

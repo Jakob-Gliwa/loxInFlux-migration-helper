@@ -154,7 +154,7 @@ pub fn run(g: &Global, a: &CutoverArgs) -> anyhow::Result<Outcome> {
     }
     if !report.executed {
         o.next_steps.push(format!(
-            "loxinflux-migrationshelper cutover --source-bucket {} --target-bucket {} --archive-name {} --execute --yes",
+            "loxinflux-migration-helper cutover --source-bucket {} --target-bucket {} --archive-name {} --execute --yes",
             sh(&a.source_bucket),
             sh(&a.target_bucket),
             sh(&archive)

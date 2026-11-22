@@ -5,12 +5,12 @@
 #     -e DOCKER_INFLUXDB_INIT_MODE=setup -e DOCKER_INFLUXDB_INIT_USERNAME=e2e \
 #     -e DOCKER_INFLUXDB_INIT_PASSWORD=e2e-e2e-e2e -e DOCKER_INFLUXDB_INIT_ORG=o \
 #     -e DOCKER_INFLUXDB_INIT_BUCKET=src -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=e2etoken influxdb:2
-#   LMH_E2E_CONTAINER=lmh-e2e tests/e2e.sh target/release/loxinflux-migrationshelper
+#   LMH_E2E_CONTAINER=lmh-e2e tests/e2e.sh target/release/loxinflux-migration-helper
 #
 # Environment: INFLUX_URL (default http://localhost:8086), INFLUX_TOKEN (e2etoken), INFLUX_ORG (o),
 # LMH_E2E_CONTAINER (optional: container name, enables the export-lp file test).
 set -u
-BIN=${1:?usage: tests/e2e.sh path/to/loxinflux-migrationshelper}
+BIN=${1:?usage: tests/e2e.sh path/to/loxinflux-migration-helper}
 export INFLUX_URL=${INFLUX_URL:-http://localhost:8086} INFLUX_TOKEN=${INFLUX_TOKEN:-e2etoken} INFLUX_ORG=${INFLUX_ORG:-o}
 WORK=$(mktemp -d); cd "$WORK" || exit 1
 H="Authorization: Token $INFLUX_TOKEN"

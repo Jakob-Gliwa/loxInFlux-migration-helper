@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "loxinflux-migrationshelper",
+    name = "loxinflux-migration-helper",
     version,
     about = "Migrate an InfluxDB v2 bucket written by loxInFlux 0.3 to the float-only schema of loxInFlux 0.5",
     long_about = "Migrate an InfluxDB v2 bucket written by loxInFlux 0.3 to the float-only schema of loxInFlux 0.5.\n\n\
@@ -20,7 +20,7 @@ Typical sequence:\n  \
 The source bucket is never modified. stdout carries one result (use --output json for machines),\n\
 stderr carries logs. Exit codes: 0 ok, 1 internal, 2 usage, 3 connection, 4 auth, 5 not found,\n\
 6 write rejected, 7 verify mismatch, 8 refused, 9 resource limit.",
-    after_help = "Docs: https://github.com/Jakob-Gliwa/loxInFlux-migrationshelper"
+    after_help = "Docs: https://github.com/Jakob-Gliwa/loxInFlux-migration-helper"
 )]
 pub struct Cli {
     #[command(flatten)]

@@ -528,12 +528,12 @@ fn run_inner(
         o.next_steps.push("rerun the same command without --dry-run (add --create-target if the target does not exist)".into());
     } else {
         o.next_steps.push(format!(
-            "loxinflux-migrationshelper verify --state {}",
+            "loxinflux-migration-helper verify --state {}",
             sh(&report.state_file)
         ));
         if let Some(src) = &a.source_bucket {
             o.next_steps.push(format!(
-                "loxinflux-migrationshelper cutover --source-bucket {} --target-bucket {}",
+                "loxinflux-migration-helper cutover --source-bucket {} --target-bucket {}",
                 sh(src),
                 sh(&a.target_bucket)
             ));

@@ -123,7 +123,7 @@ impl Client {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent(concat!(
-                "loxinflux-migrationshelper/",
+                "loxinflux-migration-helper/",
                 env!("CARGO_PKG_VERSION")
             ))
             .build()
@@ -244,7 +244,7 @@ impl Client {
         let body = json!({
             "orgID": org_id,
             "name": name,
-            "description": format!("created by loxinflux-migrationshelper from {origin}"),
+            "description": format!("created by loxinflux-migration-helper from {origin}"),
             "retentionRules": [{
                 "type": "expire",
                 "everySeconds": retention_secs,

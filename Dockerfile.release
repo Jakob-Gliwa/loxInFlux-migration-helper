@@ -1,6 +1,11 @@
 # Used by the release workflow: packages the binaries built there.
+FROM alpine:3 AS certs
+RUN apk add --no-cache ca-certificates
+
 FROM scratch
 ARG TARGETARCH
-COPY dist/${TARGETARCH}/loxinflux-migrationshelper /loxinflux-migrationshelper
+# CA bundle for https connections to InfluxDB (the TLS verifier reads the system store)
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY dist/${TARGETARCH}/loxinflux-migration-helper /loxinflux-migration-helper
 WORKDIR /work
-ENTRYPOINT ["/loxinflux-migrationshelper"]
+ENTRYPOINT ["/loxinflux-migration-helper"]

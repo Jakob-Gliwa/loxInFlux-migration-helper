@@ -418,7 +418,7 @@ pub fn run(g: &Global, a: &AnalyzeArgs) -> anyhow::Result<Outcome> {
         );
     }
     o.next_steps.push(format!(
-        "loxinflux-migrationshelper migrate --source-bucket {} --target-bucket {} --start {} --dry-run",
+        "loxinflux-migration-helper migrate --source-bucket {} --target-bucket {} --start {} --dry-run",
         sh(&bucket.name),
         sh(&format!("{}_v2", bucket.name)),
         sh(&a.range.start)

@@ -729,7 +729,7 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
             .expect("a window differs");
         if !header.source.starts_with("file:") {
             o.next_steps.push(format!(
-                "loxinflux-migrationshelper migrate --source-bucket {} --target-bucket {} --start {} --stop {} --redo --state {}",
+                "loxinflux-migration-helper migrate --source-bucket {} --target-bucket {} --start {} --stop {} --redo --state {}",
                 sh(&header.source),
                 sh(&header.target),
                 first.start,
@@ -750,7 +750,7 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         );
     } else {
         o.next_steps.push(format!(
-            "loxinflux-migrationshelper cutover --source-bucket {} --target-bucket {}",
+            "loxinflux-migration-helper cutover --source-bucket {} --target-bucket {}",
             sh(header.source.trim_start_matches("file:")),
             sh(&header.target)
         ));

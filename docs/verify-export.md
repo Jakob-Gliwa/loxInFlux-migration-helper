@@ -20,7 +20,7 @@ same InfluxDB. Reading is read-only and needs no write access to the files.
 InfluxDB in Docker, tool on the host:
 
 ```sh
-loxinflux-migrationshelper verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl \
+loxinflux-migration-helper verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl \
   --deep --read-via export-lp --influxd "docker exec influxdb influxd"
 ```
 
@@ -30,7 +30,7 @@ the data volume read-only; this avoids piping everything through
 
 ```sh
 docker run --rm --network container:influxdb --volumes-from influxdb:ro \
-  -v "$PWD:/work" -w /work --entrypoint /work/loxinflux-migrationshelper \
+  -v "$PWD:/work" -w /work --entrypoint /work/loxinflux-migration-helper \
   -e INFLUX_URL=http://localhost:8086 -e INFLUX_ORG=my-org -e INFLUX_TOKEN \
   influxdb:2 --output json verify --state lmh-state-loxinflux-to-loxinflux_v2.jsonl \
   --deep --read-via export-lp
