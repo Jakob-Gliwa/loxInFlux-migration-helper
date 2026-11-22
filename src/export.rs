@@ -23,7 +23,7 @@ use crate::guard::aborted_error;
 use crate::pipeline::LineSink;
 use crate::window::{Window, fmt_time};
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::debug;
 
@@ -71,21 +71,10 @@ impl Export {
         c
     }
 
-    /// Read `windows` (sorted, non-overlapping) of one bucket in a single
-    /// export call. Returns the checksums of every window.
-    pub fn scan(
-        &self,
-        bucket_id: &str,
-        windows: &[Window],
-        rules: &Rules,
-        scope: &[(String, String)],
-        abort: &AtomicBool,
-    ) -> anyhow::Result<ChunkSink> {
-        let mut sink = ChunkSink::new(windows.len());
-        let (Some(first), Some(last)) = (windows.first(), windows.last()) else {
-            return Ok(sink);
-        };
-        let mut cmd = self.command(bucket_id, first.start, last.stop);
+    /// Start `influxd inspect export-lp` for `[start, stop)` of one bucket.
+    /// Read the lines from `input`, then call `finish` to check the exit status.
+    pub fn open(&self, bucket_id: &str, start: i64, stop: i64) -> anyhow::Result<ExportStream> {
+        let mut cmd = self.command(bucket_id, start, stop);
         debug!(command = ?cmd, "export-lp");
         let child = cmd.spawn().map_err(|e| {
             fail(
@@ -102,8 +91,29 @@ impl Export {
             let _ = stderr.read_to_string(&mut s);
             s
         });
+        Ok(ExportStream {
+            input: BufReader::with_capacity(1 << 20, stdout),
+            run,
+            err_reader,
+        })
+    }
 
-        let mut input = BufReader::with_capacity(1 << 20, stdout);
+    /// Read `windows` (sorted, non-overlapping) of one bucket in a single
+    /// export call. Returns the checksums of every window.
+    pub fn scan(
+        &self,
+        bucket_id: &str,
+        windows: &[Window],
+        rules: &Rules,
+        scope: &[(String, String)],
+        abort: &AtomicBool,
+    ) -> anyhow::Result<ChunkSink> {
+        let mut sink = ChunkSink::new(windows.len());
+        let (Some(first), Some(last)) = (windows.first(), windows.last()) else {
+            return Ok(sink);
+        };
+        let mut stream = self.open(bucket_id, first.start, last.stop)?;
+        let input = &mut stream.input;
         let mut conv = LpConverter::new(rules, scope, 86_400);
         let mut line = Vec::with_capacity(4096);
         let mut skipped = Vec::new();
@@ -158,33 +168,53 @@ impl Export {
             }
         }
         sink.flush();
-        drop(input);
-        let status = run.0.wait()?;
-        let err = err_reader.join().unwrap_or_default();
-        if !status.success() {
-            let msg = err.trim();
-            let kind = if msg.contains("not found") || msg.contains("no such file") {
-                Kind::NotFound
-            } else {
-                Kind::Internal
-            };
-            return Err(fail(
-                kind,
-                format!(
-                    "influxd inspect export-lp failed ({status}): {}",
-                    msg.lines().last().unwrap_or("no message")
-                ),
-            )
-            .hint("check --engine-path (the directory that contains data/ and wal/) and that the bucket id exists there")
-            .into());
-        }
+        stream.finish()?;
         debug!(bucket_id, lines, "export-lp done");
         Ok(sink)
     }
 }
 
+/// A running export: line protocol on `input`.
+pub struct ExportStream {
+    pub input: BufReader<ChildStdout>,
+    run: Running,
+    err_reader: std::thread::JoinHandle<String>,
+}
+
+impl ExportStream {
+    /// Wait for influxd and turn a failed export into an error.
+    pub fn finish(self) -> anyhow::Result<()> {
+        let ExportStream {
+            input,
+            mut run,
+            err_reader,
+        } = self;
+        drop(input);
+        let status = run.0.wait()?;
+        let err = err_reader.join().unwrap_or_default();
+        if status.success() {
+            return Ok(());
+        }
+        let msg = err.trim();
+        let kind = if msg.contains("not found") || msg.contains("no such file") {
+            Kind::NotFound
+        } else {
+            Kind::Internal
+        };
+        Err(fail(
+            kind,
+            format!(
+                "influxd inspect export-lp failed ({status}): {}",
+                msg.lines().last().unwrap_or("no message")
+            ),
+        )
+        .hint("check --engine-path (the directory that contains data/ and wal/) and that the bucket id exists there")
+        .into())
+    }
+}
+
 /// The timestamp of a complete line protocol line (its last token).
-fn timestamp(line: &[u8]) -> Option<i64> {
+pub(crate) fn timestamp(line: &[u8]) -> Option<i64> {
     let mut end = line.len();
     while end > 0 && line[end - 1].is_ascii_whitespace() {
         end -= 1;

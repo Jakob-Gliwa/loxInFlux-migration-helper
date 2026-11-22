@@ -17,6 +17,7 @@ use crate::guard::{MemWatch, Shared};
 use crate::influx::Client;
 use crate::output::{Outcome, n};
 use crate::state::{self, WindowRecord};
+use crate::window::chunk_group;
 use anyhow::Context as _;
 use crossbeam_channel::{bounded, unbounded};
 use serde::Serialize;
@@ -114,13 +115,6 @@ enum Job {
     One(usize, WindowRecord),
     /// Consecutive windows compared with one export-lp call per bucket.
     Chunk(Vec<WindowRecord>),
-}
-
-/// Seconds from 0001-01-01 (InfluxDB's shard group origin) to 1970-01-01.
-const GO_ZERO_SECS: i64 = 62_135_596_800;
-
-fn chunk_group(start_ns: i64, chunk_secs: i64) -> i64 {
-    (start_ns.div_euclid(1_000_000_000) + GO_ZERO_SECS).div_euclid(chunk_secs)
 }
 
 fn window_of(rec: &WindowRecord) -> crate::window::Window {
@@ -756,21 +750,4 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         ));
     }
     Ok(o)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chunks_align_with_shard_groups() {
-        let day = 86_400;
-        let ns = |s: &str| crate::window::parse_time(s).unwrap();
-        // InfluxDB placed a 364-day shard group at 2024-02-05 and 7-day ones on Mondays.
-        let g = |t: &str, d: i64| chunk_group(ns(t), d * day);
-        assert_eq!(g("2024-02-04", 364) + 1, g("2024-02-05", 364));
-        assert_eq!(g("2024-02-05", 364), g("2025-02-02", 364));
-        assert_eq!(g("2025-06-08", 7) + 1, g("2025-06-09", 7));
-        assert_eq!(g("2025-06-09", 7), g("2025-06-15", 7));
-    }
 }

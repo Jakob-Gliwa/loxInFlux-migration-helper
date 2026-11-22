@@ -16,6 +16,7 @@ Typical sequence:\n  \
 1. analyze   - what types are stored, where do conflicts hide (read-only)\n  \
 2. migrate   - copy into a new bucket, converting values (resumable; --dry-run first)\n  \
 3. verify    - compare written vs stored counts per window\n  \
+   recover   - optional: copy values only the storage files still hold (needs export-lp)\n  \
 4. cutover   - swap bucket names (check mode by default; --execute --yes to act)\n\n\
 The source bucket is never modified. stdout carries one result (use --output json for machines),\n\
 stderr carries logs. Exit codes: 0 ok, 1 internal, 2 usage, 3 connection, 4 auth, 5 not found,\n\
@@ -116,6 +117,9 @@ pub enum Command {
     Migrate(MigrateArgs),
     /// Compare the counts recorded by `migrate` with what the target bucket holds.
     Verify(VerifyArgs),
+    /// Copy values that are stored on disk but no query returns (fields missing from
+    /// the shard's field index) into the target, converted with the same rules.
+    Recover(RecoverArgs),
     /// Swap bucket names after a migration (check only unless --execute --yes).
     Cutover(CutoverArgs),
     /// Show how one value would be converted (offline, no InfluxDB needed).
@@ -293,6 +297,83 @@ pub struct VerifyArgs {
     /// groups. 0 = the larger shard group duration of the two buckets.
     #[arg(long, default_value_t = 0)]
     pub export_chunk_days: u32,
+}
+
+#[derive(Args)]
+pub struct RecoverArgs {
+    /// Bucket whose storage files hold the values (never modified). Must be on the
+    /// InfluxDB whose engine directory export-lp reads.
+    #[arg(long)]
+    pub source_bucket: String,
+    /// Bucket to write the recovered values to (usually the migrated bucket).
+    #[arg(long)]
+    pub target_bucket: String,
+    /// Start of the time range (YYYY-MM-DD or RFC 3339), inclusive.
+    #[arg(long)]
+    pub start: String,
+    /// End of the time range (YYYY-MM-DD, RFC 3339 or `now`), exclusive.
+    #[arg(long, default_value = "now")]
+    pub stop: String,
+    /// Only these measurements (repeatable). Default: all.
+    #[arg(long = "measurement", value_name = "NAME")]
+    pub measurements: Vec<String>,
+    /// Convert only points with this tag (repeatable, OR); other points are written unchanged.
+    /// Use the same value as for `migrate`.
+    #[arg(long = "convert-where-tag", value_name = "KEY=VALUE")]
+    pub convert_where_tag: Vec<String>,
+    /// Find and convert, but write nothing. Uses its own state file.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Checkpoint file. Default: ./lmh-recover-<source>-to-<target>[-dry-run].jsonl
+    #[arg(long)]
+    pub state: Option<PathBuf>,
+    /// Check windows again that the state file marks as finished.
+    #[arg(long)]
+    pub redo: bool,
+    /// Storage engine directory as the influxd command sees it.
+    #[arg(
+        long,
+        env = "LMH_ENGINE_PATH",
+        default_value = "/var/lib/influxdb2/engine"
+    )]
+    pub engine_path: String,
+    /// Command that runs influxd, split on spaces
+    /// (e.g. "docker exec influxdb influxd" when InfluxDB runs in a container).
+    #[arg(long, env = "LMH_INFLUXD", default_value = "influxd")]
+    pub influxd: String,
+    /// Days read by one export call, aligned like shard groups; also how much is
+    /// redone after an interruption. 0 = the source's shard group duration.
+    #[arg(long, default_value_t = 0)]
+    pub export_chunk_days: u32,
+    /// How many (measurement, field) pairs the human summary lists (JSON has all).
+    #[arg(long, default_value_t = 15)]
+    pub top: usize,
+    /// Parallel write requests.
+    #[arg(long, env = "LMH_WRITERS", default_value_t = 2)]
+    pub writers: usize,
+    /// Field values per write request.
+    #[arg(long, default_value_t = 10_000)]
+    pub batch_size: u64,
+    /// Maximum uncompressed size of one write request, in MiB.
+    #[arg(long, default_value_t = 4)]
+    pub batch_mb: usize,
+    /// Limit the write rate in field values per second (0 = unlimited).
+    #[arg(long, env = "LMH_MAX_RATE", default_value_t = 0)]
+    pub max_rate: u64,
+    /// Send uncompressed (saves CPU on both sides when InfluxDB is local).
+    #[arg(long)]
+    pub no_gzip: bool,
+    /// Pause writes while InfluxDB's Go heap is this many MiB above its value at start (0 = off).
+    #[arg(long, env = "LMH_INFLUX_HEAP_HEADROOM_MB", default_value_t = 1024)]
+    pub influx_heap_headroom_mb: u64,
+    /// Give up (exit 9) if writes stay paused by the InfluxDB memory guard this long.
+    #[arg(long, default_value_t = 600)]
+    pub max_pause_secs: u64,
+    /// What to do when InfluxDB rejects a batch.
+    #[arg(long, value_enum, default_value = "abort")]
+    pub on_reject: OnReject,
+    #[command(flatten)]
+    pub rules: RuleArgs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

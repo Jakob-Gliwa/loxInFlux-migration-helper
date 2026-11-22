@@ -126,6 +126,7 @@ is converted then; everything else is copied unchanged.
 | `--max-rate N`                | at most N values per second, to keep the server responsive          |
 | `--output json`               | machine-readable result, see [docs/output.md](docs/output.md)       |
 | `verify --read-via export-lp` | read the storage files directly, several times faster (experimental, [details](docs/verify-export.md)) |
+| `recover`                     | copy values that only the storage files still hold (see below)      |
 
 All options: `loxinflux-migration-helper <command> --help`.
 
@@ -136,18 +137,23 @@ disk. Queries, Grafana and therefore a normal migration then skip them without
 any error. `verify --deep --read-via export-lp` reports such values as
 `source_values_only_on_disk`.
 
-To copy them as well, read from the storage files instead of the query API:
-export with `influxd inspect export-lp` and pass the result to
-`migrate --from-lp`, with the same rules. Writing the same point twice does no
-harm, so this can also be done after a normal migration.
+`recover` copies exactly these values. It reads the storage files with
+`influxd inspect export-lp`, keeps only the measurement/field pairs that a
+query does not return, converts them with the same rules and writes them into
+the migrated bucket. Values the migration already copied are left alone.
 
 ```sh
-docker exec influxdb influxd inspect export-lp --bucket-id <old bucket id> \
-    --engine-path /var/lib/influxdb2/engine --start 2025-01-01T00:00:00Z --end 2026-01-01T00:00:00Z \
-    --output-path - --log-level error \
-  | loxinflux-migration-helper migrate --from-lp - --target-bucket loxinflux \
-      --convert-where-tag application=loxInFlux --state recover.jsonl
+# what would be recovered (read-only)
+loxinflux-migration-helper recover --source-bucket loxinflux_pre_migration --target-bucket loxinflux \
+  --start 2020-01-01 --stop 2026-11-21 --convert-where-tag application=loxInFlux \
+  --influxd "docker exec influxdb influxd" --dry-run
+
+# then the same without --dry-run
 ```
+
+Use the same rule options as for `migrate`. Like `verify --read-via export-lp`,
+it must run where it can start `influxd` with access to the storage directory
+(see [docs/verify-export.md](docs/verify-export.md)).
 
 ## When something goes wrong
 

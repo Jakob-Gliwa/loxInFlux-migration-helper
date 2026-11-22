@@ -2,6 +2,7 @@ pub mod analyze;
 pub mod convert_value;
 pub mod cutover;
 pub mod migrate;
+pub mod recover;
 pub mod verify;
 
 use crate::cli::Global;

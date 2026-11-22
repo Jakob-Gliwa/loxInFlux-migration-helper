@@ -30,6 +30,8 @@ agents that **change** its code.
 | `migrate --dry-run`                       | read-only, writes a local state file      | no                   |
 | `migrate`                                 | writes into the **target** bucket only    | yes (creates load, may create a bucket) |
 | `verify`                                  | read-only                                 | no                   |
+| `recover --dry-run`                       | read-only (export-lp), local state file   | no                   |
+| `recover`                                 | writes hidden values into the **target**  | yes                  |
 | `cutover` (without `--execute`)           | read-only plan                            | no                   |
 | `cutover --execute --yes`                 | renames production buckets                | **yes, always**      |
 
@@ -58,9 +60,19 @@ choice; `verify` will then report extra values as a warning).
    where `influxd` and the engine directory are available, add
    `--read-via export-lp` (faster; see docs/verify-export.md). A warning about
    `source_values_only_on_disk` means the source has values no query returns:
-   report it to the user; it is not a migration error.
+   report it to the user; it is not a migration error. With approval, copy them
+   with `recover` (step 4b).
    * Exit 7: rerun `migrate` with `--redo --start <window start> --stop <window stop>`
      for the windows listed in `result.windows` (or use `next_steps[0]`), then verify again.
+4b. Optional, needs `influxd` and the engine directory like export-lp:
+   `recover --source-bucket <old> --target-bucket <migrated> --start .. --stop ..
+   <same rule flags and --convert-where-tag as migrate> --dry-run --output json`
+   → report `hidden_values`, `hidden_pairs` and the top of `pairs` (and
+   `visible_query_fallbacks` if > 0) → with approval the same command without
+   `--dry-run`. It writes only (measurement, field) pairs that the query API does
+   not return in a window, so values the migration copied are never touched.
+   Rerun after exit 3/9/10 resumes per export chunk (`--export-chunk-days`).
+   Then `verify --deep --read-via export-lp` with the migration's state file.
 5. `cutover ... --output json` (plan) → show `warnings` (tokens bound to the old
    bucket ID, InfluxQL mappings) to the user → only with approval
    `cutover ... --execute --yes`.
@@ -73,6 +85,8 @@ choice; `verify` will then report extra values as a warning).
   what is converted (the rest is copied unchanged). For a complete migration
   use `--convert-where-tag`, not `--measurement`.
 * A dry run uses its own state file (`…-dry-run.jsonl`); it cannot be verified.
+* `recover` keeps its own state file (`lmh-recover-…jsonl`); do not pass it to
+  `verify`, which expects the migration's state file.
 * On a production server, keep it gentle: `--writers 2` and/or `--max-rate`.
   The run is CPU-bound on the InfluxDB side.
 

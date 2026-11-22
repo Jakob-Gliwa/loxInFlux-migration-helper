@@ -68,6 +68,8 @@ jobs:
           DOCKER_INFLUXDB_INIT_ORG: o
           DOCKER_INFLUXDB_INIT_BUCKET: src
           DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: e2etoken
+          # TSM files within seconds: the recover test needs fields that only TSM files hold
+          INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION: 1s
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust

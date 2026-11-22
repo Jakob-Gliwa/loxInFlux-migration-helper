@@ -94,6 +94,7 @@ fn main() {
         Command::Analyze(a) => ("analyze", commands::analyze::run(g, a)),
         Command::Migrate(a) => ("migrate", commands::migrate::run(g, a)),
         Command::Verify(a) => ("verify", commands::verify::run(g, a)),
+        Command::Recover(a) => ("recover", commands::recover::run(g, a)),
         Command::Cutover(a) => ("cutover", commands::cutover::run(g, a)),
         Command::ConvertValue(a) => ("convert-value", commands::convert_value::run(a)),
     };

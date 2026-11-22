@@ -12,12 +12,12 @@ The actual interruption is a few minutes. Everything before that runs while
  2 analyze                                 8 copy today, rename buckets     11 clean up
  3 choose the rules                        9 swap tokens, start 0.5
  4 copy the history
- 5 verify
+ 5 verify (+ recover, optional)
  6 prepare config and tokens
 ```
 
 The examples use the bucket `loxinflux` and the org `home`. Replace them with
-yours. `lmh` stands for `loxinflux-migrationshelper`; see the
+yours. `lmh` stands for `loxinflux-migration-helper`; see the
 [README](../README.md#install) for how to run it. Set the connection once:
 
 ```sh
@@ -95,6 +95,25 @@ lmh verify --state state.jsonl --deep
 applying the rules. Exit code 0 means the new bucket matches. It takes about as
 long as the copy. Days that differ can be copied again with
 `lmh migrate ... --start <day> --stop <next day> --redo`.
+
+**Optional: values only the storage files hold.** If you can run the tool
+next to InfluxDB with access to its storage directory, compare through the
+storage files instead (`--read-via export-lp`, see
+[verify-export.md](verify-export.md)). A warning about
+`source_values_only_on_disk` means InfluxDB has values on disk that no query
+returns (fields missing from its index). They were invisible before, so the
+migration could not copy them. `recover` writes exactly those into the new
+bucket:
+
+```sh
+lmh recover --source-bucket loxinflux --target-bucket loxinflux_v2 \
+  --start 2020-01-01 --stop 2026-11-21 \
+  --convert-where-tag application=loxInFlux --keep-placeholders \
+  --influxd "docker exec influxdb influxd" --dry-run    # then without --dry-run
+```
+
+Use the same rules as in step 4. Afterwards `verify --deep --read-via export-lp`
+should show no differences.
 
 ### 6. Prepare the switch
 

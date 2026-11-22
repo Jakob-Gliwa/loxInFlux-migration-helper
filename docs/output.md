@@ -76,6 +76,25 @@ With `--deep`, the counts (`actual`, `missing`, `extra`) of compared windows
 come from the deep comparison; only windows skipped by `--sample-every` run a
 separate count query.
 
+## `recover`
+
+| Field | Meaning |
+|---|---|
+| `source`, `target`, `dry_run`, `state_file`, `window_secs`, `export_chunk_days` | `export_chunk_days`: days per export-lp call (one shard group by default) |
+| `windows_total`, `windows_skipped_already_done`, `windows_checked_now`, `windows_with_hidden_values` | day windows in `--start`/`--stop` |
+| `visible_query_fallbacks` | windows whose visible pairs had to be read row by row (InfluxDB panicked on the pushed-down query) |
+| `lines_read`, `lines_per_sec` | export-lp lines read |
+| `hidden_pairs`, `hidden_values` | (measurement, field) pairs and values on disk that no query returned in their window |
+| `values_written`, `values_dropped` | after the conversion rules (dropped: empty strings, placeholders, ...) |
+| `pairs[]` | every hidden pair, most values first: `measurement`, `field`, `values` |
+| `windows[]` | windows with hidden values: `start`, `hidden_pairs`, `hidden_values`, `values_written` |
+| `write_requests`, `rejected_batches`, `elapsed_secs`, `input_types`, `actions`, `rules`, `convert_where_tag`, `resources` | as for `migrate` |
+
+A pair counts as visible in a window when the query API returns it there
+(`first()` per series and field, or a row scan when InfluxDB fails on that).
+The field index that decides this is kept per shard, and a window never spans
+two shards. Visible pairs are never written.
+
 ## `cutover`
 
 | Field | Meaning |
@@ -100,3 +119,8 @@ then one line per finished window `{"kind":"window","start_ns","stop_ns",
 "written_by_measurement","finished_at"}`. After `--redo` a window can appear
 again; the last line wins. In line protocol mode `values_read` and
 `values_dropped` are 0 per window (totals are in the migrate result).
+
+`recover` writes `lmh-recover-<source>-to-<target>[-dry-run].jsonl` in the same
+format, with `"source":"recover:<bucket>"`; per window `values_read` is the
+number of hidden values. Windows are recorded per export chunk, after all its
+batches were acknowledged.

@@ -4,11 +4,13 @@
 #   docker run -d --name lmh-e2e -p 8086:8086 \
 #     -e DOCKER_INFLUXDB_INIT_MODE=setup -e DOCKER_INFLUXDB_INIT_USERNAME=e2e \
 #     -e DOCKER_INFLUXDB_INIT_PASSWORD=e2e-e2e-e2e -e DOCKER_INFLUXDB_INIT_ORG=o \
-#     -e DOCKER_INFLUXDB_INIT_BUCKET=src -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=e2etoken influxdb:2
+#     -e DOCKER_INFLUXDB_INIT_BUCKET=src -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=e2etoken \
+#     -e INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION=1s influxdb:2
 #   LMH_E2E_CONTAINER=lmh-e2e tests/e2e.sh target/release/loxinflux-migration-helper
 #
 # Environment: INFLUX_URL (default http://localhost:8086), INFLUX_TOKEN (e2etoken), INFLUX_ORG (o),
-# LMH_E2E_CONTAINER (optional: container name, enables the export-lp file test).
+# LMH_E2E_CONTAINER (optional: container name, enables the export-lp file test and, if the container runs
+# with INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION=1s, the recover test; that test restarts it).
 set -u
 BIN=${1:?usage: tests/e2e.sh path/to/loxinflux-migration-helper}
 export INFLUX_URL=${INFLUX_URL:-http://localhost:8086} INFLUX_TOKEN=${INFLUX_TOKEN:-e2etoken} INFLUX_ORG=${INFLUX_ORG:-o}
@@ -113,6 +115,42 @@ if [ -n "${LMH_E2E_CONTAINER:-}" ]; then
   check "... and passes again after --redo" "[ $rc = 0 ]"
   L --output json verify --state lmh-state-src-to-dst.jsonl --deep --read-via export-lp --influxd /nonexistent/influxd > vx3.json 2>/dev/null; rc=$?
   check "export-lp without influxd: exit 2 with hint" "[ $rc = 2 ] && grep -q 'docker exec' vx3.json"
+
+  # recover: make a field invisible to queries the way it happens in real buckets (the shard's field
+  # change log is lost after the field reached a TSM file), then copy it with `recover`.
+  # Needs INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION=1s on the container (TSM files within seconds).
+  C=$LMH_E2E_CONTAINER
+  up(){ for _ in $(seq 1 60); do curl -sf "$INFLUX_URL/health" >/dev/null && return 0; sleep 1; done; return 1; }
+  if docker exec "$C" printenv INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION >/dev/null 2>&1; then
+    curl -s -o /dev/null -XPOST "$INFLUX_URL/api/v2/buckets" -H "$H" -H 'Content-Type: application/json' --data "{\"orgID\":\"$ORG_ID\",\"name\":\"hid\",\"retentionRules\":[]}"
+    HID_ID=$(id_of "buckets?name=hid&org=$INFLUX_ORG")
+    w hid 'Heat,application=loxInFlux,uuid=h1 AQ=1i 1700000000' >/dev/null
+    sleep 3; docker restart "$C" >/dev/null; up
+    w hid 'Heat,application=loxInFlux,uuid=h1 Q=2i,Default="5 kWh" 1700000060' >/dev/null
+    sleep 3; docker stop "$C" >/dev/null
+    docker run --rm --volumes-from "$C" alpine:3 sh -c "rm -f /var/lib/influxdb2/engine/data/$HID_ID/autogen/*/fields.idxl" >/dev/null 2>&1
+    docker start "$C" >/dev/null; up
+    vis=$(qa 'from(bucket: "hid") |> range(start: 2023-11-14T00:00:00Z, stop: 2023-11-15T00:00:00Z)' | grep -c ',Heat,')
+    if [ "$vis" = 1 ]; then
+      L migrate --source-bucket hid --target-bucket hid2 --start 2023-11-14 --stop 2023-11-15 "${SCOPE[@]}" --create-target --state h.jsonl >/dev/null 2>&1
+      RX=(--source-bucket hid --target-bucket hid2 --start 2023-11-14 --stop 2023-11-15 "${SCOPE[@]}" --influxd "docker exec $C influxd")
+      L --output json recover "${RX[@]}" --dry-run > rd.json 2>/dev/null; rc=$?
+      check "recover --dry-run: finds 2 hidden values in 2 fields" "[ $rc = 0 ] && grep -q '\"hidden_values\": 2' rd.json && grep -q '\"hidden_pairs\": 2' rd.json"
+      L --output json recover "${RX[@]}" > rr.json 2>/dev/null; rc=$?
+      check "recover: exit 0, 2 written" "[ $rc = 0 ] && grep -q '\"values_written\": 2' rr.json"
+      qa 'from(bucket: "hid2") |> range(start: 2023-11-14T00:00:00Z, stop: 2023-11-15T00:00:00Z) |> filter(fn: (r) => r._field == "Q" or r._field == "Default") |> keep(columns: ["_field", "_value"])' | tr -d '\r' > hq.csv
+      check "recover: hidden values readable in the target as floats (Q=2, Default=5)" \
+        "[ \$(grep -c '^,_result,' hq.csv) = 2 ] && ! grep '^#datatype' hq.csv | grep -qv ',double,' && grep -q ',5,Default\$' hq.csv && grep -q ',2,Q\$' hq.csv"
+      L --output json recover "${RX[@]}" > rr2.json 2>/dev/null; rc=$?
+      check "recover rerun: resumes, nothing to do" "[ $rc = 0 ] && grep -q '\"windows_checked_now\": 0' rr2.json"
+      L --output json verify --state h.jsonl --deep --read-via export-lp --influxd "docker exec $C influxd" > hv.json 2>/dev/null; rc=$?
+      check "verify --deep --read-via export-lp after recover: exit 0" "[ $rc = 0 ] && grep -q '\"series_different\": 0' hv.json"
+    else
+      echo "SKIP recover test: could not make a field invisible (Flux rows: $vis)"
+    fi
+  else
+    echo "SKIP recover test (container needs INFLUXD_STORAGE_CACHE_SNAPSHOT_WRITE_COLD_DURATION=1s)"
+  fi
 else
   echo "SKIP export-lp file test (set LMH_E2E_CONTAINER)"
 fi

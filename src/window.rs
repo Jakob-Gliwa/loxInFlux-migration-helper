@@ -101,6 +101,16 @@ pub fn parse_duration_secs(s: &str) -> anyhow::Result<i64> {
     Ok(n * mult)
 }
 
+/// Seconds from 0001-01-01 (InfluxDB's shard group origin) to 1970-01-01.
+const GO_ZERO_SECS: i64 = 62_135_596_800;
+
+/// Index of the shard-group-aligned chunk of `chunk_secs` that contains
+/// `start_ns`. InfluxDB places shard groups at multiples of their duration
+/// counted from 0001-01-01, so a chunk of the shard duration is one shard group.
+pub fn chunk_group(start_ns: i64, chunk_secs: i64) -> i64 {
+    (start_ns.div_euclid(NS) + GO_ZERO_SECS).div_euclid(chunk_secs.max(1))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Window {
     pub start: i64,
@@ -176,5 +186,17 @@ mod tests {
         assert_eq!(default_shard_duration_secs(3600), 3600);
         assert_eq!(default_shard_duration_secs(30 * 86_400), 86_400);
         assert_eq!(default_shard_duration_secs(365 * 86_400), 604_800);
+    }
+
+    #[test]
+    fn chunks_align_with_shard_groups() {
+        let day = 86_400;
+        let ns = |s: &str| parse_time(s).unwrap();
+        // InfluxDB placed a 364-day shard group at 2024-02-05 and 7-day ones on Mondays.
+        let g = |t: &str, d: i64| chunk_group(ns(t), d * day);
+        assert_eq!(g("2024-02-04", 364) + 1, g("2024-02-05", 364));
+        assert_eq!(g("2024-02-05", 364), g("2025-02-02", 364));
+        assert_eq!(g("2025-06-08", 7) + 1, g("2025-06-09", 7));
+        assert_eq!(g("2025-06-09", 7), g("2025-06-15", 7));
     }
 }

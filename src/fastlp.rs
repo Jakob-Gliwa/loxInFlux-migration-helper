@@ -379,7 +379,7 @@ fn unescape_string(s: &[u8], out: &mut String) {
     out.push_str(&String::from_utf8_lossy(&buf));
 }
 
-fn trim_end(s: &[u8]) -> &[u8] {
+pub(crate) fn trim_end(s: &[u8]) -> &[u8] {
     let mut e = s.len();
     while e > 0 && matches!(s[e - 1], b'\n' | b'\r') {
         e -= 1;
@@ -398,6 +398,59 @@ fn trim(s: &[u8]) -> &[u8] {
         e -= 1;
     }
     &s[a..e]
+}
+
+/// (key, value) byte ranges of one field.
+pub(crate) type FieldSpan = ((usize, usize), (usize, usize));
+
+/// Byte ranges of one logical line (without the trailing newline): the end of
+/// the measurement, the end of the series key, every field as (key, value)
+/// and the end of the field set (the timestamp follows after one space).
+/// Quoted string values may contain spaces, commas and escaped quotes.
+pub(crate) fn split_fields(
+    line: &[u8],
+    fields: &mut Vec<FieldSpan>,
+) -> Result<(usize, usize, usize), LineError> {
+    fields.clear();
+    let (meas_end, i) = scan_series(line).ok_or(LineError::Invalid("missing fields"))?;
+    let mut j = i + 1;
+    let mut key_start = j;
+    let mut eq = None;
+    let mut quoted = false;
+    loop {
+        let at_end = j >= line.len();
+        let b = if at_end { b' ' } else { line[j] };
+        if !at_end && b == b'\\' {
+            j += 2;
+            continue;
+        }
+        if quoted {
+            if at_end {
+                return Err(LineError::Unterminated);
+            }
+            if b == b'"' {
+                quoted = false;
+            }
+            j += 1;
+            continue;
+        }
+        match b {
+            b'"' => quoted = true,
+            b'=' if eq.is_none() => eq = Some(j),
+            b',' | b' ' => {
+                let e = eq.ok_or(LineError::Invalid("field without value"))?;
+                fields.push(((key_start, e), (e + 1, j.min(line.len()))));
+                eq = None;
+                if b == b' ' {
+                    break;
+                }
+                key_start = j + 1;
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    Ok((meas_end, i, j.min(line.len())))
 }
 
 /// (end of measurement, end of series key): the first unescaped `,` and the
