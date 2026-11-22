@@ -24,7 +24,12 @@ First release.
 - `--target-url/--target-token/--target-org`, `--max-rate`, `--no-gzip`,
   `--from-lp -` (stdin), JSON-lines state file.
 - `verify --deep`: per-series count and checksum of every value, source vs
-  target (`--sample-every`).
+  target (`--sample-every`). Deep windows take their counts from the
+  comparison (no separate count query).
+- `verify --deep --read-via export-lp`: reads both buckets with
+  `influxd inspect export-lp` (`--influxd`, `--engine-path`,
+  `--export-chunk-days`); windows that differ are re-checked through Flux;
+  reports source values stored on disk that no query returns.
 - Clean stop on SIGINT/SIGTERM (exit 10), state file lock, repair of a
   partial last line, lost connections classified as exit 3.
 - `analyze` works around an InfluxDB 2.x panic in pushed-down `first()`/`count()`

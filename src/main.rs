@@ -3,6 +3,7 @@ mod commands;
 mod convert;
 mod deep;
 mod error;
+mod export;
 mod fast;
 mod fastcsv;
 mod fastlp;

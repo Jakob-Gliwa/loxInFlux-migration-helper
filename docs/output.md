@@ -69,7 +69,12 @@ Actions: `float_kept`, `int_to_float`, `unsigned_to_float`, `bool_to_float`,
 | `expected_total`, `actual_total`, `missing_total`, `extra_total` | values |
 | `missing_by_measurement` | measurement → missing values (all windows) |
 | `windows[]` | only windows that differ: `start`, `stop`, `expected`, `actual`, `missing`, `extra`, `missing_by_measurement`, with `--deep` also `deep` (see below) |
-| `deep` | with `--deep`: `windows_compared`, `windows_with_differences`, `series_compared`, `series_missing`, `series_different`, `series_extra`, `source_values`, `target_values`, `examples[]` (up to 20 `window: series field (what)`) |
+| `deep` | with `--deep`: `read_via` (`flux` or `export-lp`), `windows_compared`, `windows_with_differences`, `series_compared`, `series_missing`, `series_different`, `series_extra`, `source_values`, `target_values`, `examples[]` (up to 20 `window: series field (what)`); export-lp only: `windows_rechecked_via_flux`, `source_values_only_on_disk`, `source_switched_to_flux` (see [verify-export.md](verify-export.md)) |
+| `windows[].rechecked_via_flux`, `windows[].source_values_only_on_disk` | export-lp only: the window differed there and its result comes from Flux; source values on disk that no query returns |
+
+With `--deep`, the counts (`actual`, `missing`, `extra`) of compared windows
+come from the deep comparison; only windows skipped by `--sample-every` run a
+separate count query.
 
 ## `cutover`
 

@@ -54,7 +54,11 @@ choice; `verify` will then report extra values as a warning).
    * Exit 6: the target already has conflicting types — usually the wrong
      target bucket. Stop and ask.
 4. `verify --state <file> --deep --output json` (`--deep` reads both buckets
-   fully; for a quick check drop it or use `--sample-every 7`).
+   fully; for a quick check drop it or use `--sample-every 7`). If the tool runs
+   where `influxd` and the engine directory are available, add
+   `--read-via export-lp` (faster; see docs/verify-export.md). A warning about
+   `source_values_only_on_disk` means the source has values no query returns:
+   report it to the user; it is not a migration error.
    * Exit 7: rerun `migrate` with `--redo --start <window start> --stop <window stop>`
      for the windows listed in `result.windows` (or use `next_steps[0]`), then verify again.
 5. `cutover ... --output json` (plan) → show `warnings` (tokens bound to the old

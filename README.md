@@ -134,6 +134,9 @@ omit it for a complete move.
   conversion on the source and compares, per series and field, the number of
   values and a checksum over every timestamp and value — a changed value with
   an unchanged count is caught too. `--sample-every N` limits it to every Nth window.
+  `--read-via export-lp` (experimental) reads both buckets from the storage
+  files instead of through Flux and also reports values that are stored but
+  invisible to queries; see [docs/verify-export.md](docs/verify-export.md).
 * **Robust against interruptions.** SIGINT/SIGTERM (Ctrl-C, `docker stop`)
   stop cleanly after the in-flight requests (exit code 10); a second signal
   exits at once. A killed process leaves at most a partial last line in the

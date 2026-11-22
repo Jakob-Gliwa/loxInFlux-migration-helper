@@ -101,9 +101,24 @@ if [ -n "${LMH_E2E_CONTAINER:-}" ]; then
   docker exec "$LMH_E2E_CONTAINER" influxd inspect export-lp --bucket-id "$SRC_ID" --engine-path /var/lib/influxdb2/engine --output-path - --log-level error \
     | L --output json migrate --from-lp - --target-bucket dst3 --create-target "${SCOPE[@]}" > p.json 2>/dev/null; rc=$?
   check "export-lp piped via stdin: exit 0, 9 written" "[ $rc = 0 ] && grep -q '\"values_written\": 9' p.json"
+  X=(--deep --read-via export-lp --influxd "docker exec $LMH_E2E_CONTAINER influxd")
+  L --output json verify --state lmh-state-src-to-dst.jsonl "${X[@]}" > vx.json 2>vx.err; rc=$?
+  check "verify --deep --read-via export-lp: exit 0 (rechecked via flux: $(grep -o '"windows_rechecked_via_flux": *[0-9]*' vx.json | grep -o '[0-9]*$'))" \
+    "[ $rc = 0 ] && grep -q '\"read_via\": \"export-lp\"' vx.json && grep -q '\"series_different\": 0' vx.json"
+  w dst 'Temperatur,application=loxInFlux,room=Bad,uuid=u1 AQ=77.5 1700000000' >/dev/null
+  L --output json verify --state lmh-state-src-to-dst.jsonl "${X[@]}" > vx2.json 2>/dev/null; rc=$?
+  check "... export-lp catches a changed value: exit 7" "[ $rc = 7 ] && grep -q '\"series_different\": 1' vx2.json"
+  L migrate --source-bucket src --target-bucket dst --start 2023-11-14 --stop 2023-11-15 --redo "${SCOPE[@]}" >/dev/null 2>&1
+  L verify --state lmh-state-src-to-dst.jsonl "${X[@]}" >/dev/null 2>&1; rc=$?
+  check "... and passes again after --redo" "[ $rc = 0 ]"
+  L --output json verify --state lmh-state-src-to-dst.jsonl --deep --read-via export-lp --influxd /nonexistent/influxd > vx3.json 2>/dev/null; rc=$?
+  check "export-lp without influxd: exit 2 with hint" "[ $rc = 2 ] && grep -q 'docker exec' vx3.json"
 else
   echo "SKIP export-lp file test (set LMH_E2E_CONTAINER)"
 fi
+
+L --output json verify --state lmh-state-src-to-dst.jsonl --read-via export-lp > vu.json 2>/dev/null; rc=$?
+check "--read-via export-lp without --deep: exit 2" "[ $rc = 2 ]"
 
 L --memory-limit-mb 1 --output json migrate --source-bucket src --target-bucket dst4 "${R[@]}" --create-target --dry-run > mem.json 2>/dev/null; rc=$?
 check "memory watchdog: exit 9 (resource_limit)" "[ $rc = 9 ] && grep -q 'resource_limit' mem.json"

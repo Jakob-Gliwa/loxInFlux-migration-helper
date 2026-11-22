@@ -273,6 +273,32 @@ pub struct VerifyArgs {
     /// With --deep: only every Nth window gets the deep comparison (counts are checked for all).
     #[arg(long, default_value_t = 1)]
     pub sample_every: usize,
+    /// With --deep: how both buckets are read. `flux` uses the query API; `export-lp`
+    /// runs `influxd inspect export-lp` on the storage files (faster, needs access to
+    /// the engine directory; windows that differ are re-checked through Flux).
+    #[arg(long, env = "LMH_READ_VIA", value_enum, default_value = "flux")]
+    pub read_via: ReadVia,
+    /// export-lp: storage engine directory as the influxd command sees it.
+    #[arg(
+        long,
+        env = "LMH_ENGINE_PATH",
+        default_value = "/var/lib/influxdb2/engine"
+    )]
+    pub engine_path: String,
+    /// export-lp: command that runs influxd, split on spaces
+    /// (e.g. "docker exec influxdb influxd" when InfluxDB runs in a container).
+    #[arg(long, env = "LMH_INFLUXD", default_value = "influxd")]
+    pub influxd: String,
+    /// export-lp: days read by one export call per bucket, aligned like shard
+    /// groups. 0 = the larger shard group duration of the two buckets.
+    #[arg(long, default_value_t = 0)]
+    pub export_chunk_days: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ReadVia {
+    Flux,
+    ExportLp,
 }
 
 #[derive(Args)]

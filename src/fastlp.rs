@@ -74,7 +74,7 @@ impl WindowCounts {
     }
 }
 
-fn unescape_key(s: &[u8]) -> String {
+pub(crate) fn unescape_key(s: &[u8]) -> String {
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
