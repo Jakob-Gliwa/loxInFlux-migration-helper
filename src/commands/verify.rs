@@ -58,9 +58,6 @@ struct DeepTotals {
     /// export-lp only: source values stored on disk that no query returns
     /// (so they were not migrated either). Counted in re-checked windows.
     source_values_only_on_disk: u64,
-    /// export-lp only: the source turned out to hold such values, so it was
-    /// read through Flux from then on (the target still via export-lp).
-    source_switched_to_flux: bool,
     windows_with_differences: usize,
     series_compared: usize,
     series_missing: usize,
@@ -108,15 +105,9 @@ struct ExportCtx {
     /// Chunk length; chunks are aligned like shard groups (multiples of
     /// the length since 0001-01-01), so one chunk decodes one shard group.
     chunk_secs: i64,
-    /// Set after repeated windows where only the source differed on disk.
-    source_via_flux: AtomicBool,
-    source_hidden_windows: AtomicUsize,
+    /// The warning about values only on disk was logged.
+    warned_hidden: AtomicBool,
 }
-
-/// Windows whose source holds values Flux does not return, before the
-/// source is read through Flux instead (re-checking every window costs more
-/// than reading the source through Flux once).
-const SWITCH_AFTER: usize = 3;
 
 enum Job {
     /// Count check, or a deep comparison through Flux.
@@ -186,25 +177,21 @@ fn export_chunk(
     abort: &AtomicBool,
 ) -> anyhow::Result<Vec<WindowResult>> {
     let wins: Vec<_> = recs.iter().map(window_of).collect();
-    let source_via_flux = x.source_via_flux.load(Ordering::Relaxed);
     info!(
         start = %date(recs[0].start_ns),
         stop = %date(recs[recs.len() - 1].stop_ns),
         windows = recs.len(),
-        source = if source_via_flux { "flux" } else { "export-lp" },
         "export-lp chunk"
     );
     let (src, tgt) = std::thread::scope(|s| {
-        let src = (!source_via_flux)
-            .then(|| s.spawn(|| x.export.scan(&x.src_id, &wins, &d.rules, &d.scope, abort)));
+        let src = s.spawn(|| x.export.scan(&x.src_id, &wins, &d.rules, &d.scope, abort));
         let tgt = x.export.scan(&x.tgt_id, &wins, &d.rules, &d.scope, abort);
-        let src = src.map(|h| {
-            h.join()
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("export reader panicked")))
-        });
+        let src = src
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("export reader panicked")));
         (src, tgt)
     });
-    let src = src.transpose()?.map(Mutex::new);
+    let src = Mutex::new(src?);
     let tgt = Mutex::new(tgt?);
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<WindowResult>>> =
@@ -219,7 +206,7 @@ fn export_chunk(
                             return Ok(());
                         }
                         let t = tgt.lock().expect("lock").window(i);
-                        let s = src.as_ref().map(|m| m.lock().expect("lock").window(i));
+                        let s = src.lock().expect("lock").window(i);
                         let w = export_window(d, x, client, bucket, &recs[i], s, t, abort)?;
                         results.lock().expect("lock")[i] = Some(w);
                     }
@@ -250,30 +237,28 @@ fn export_window(
     client: &Client,
     bucket: &str,
     rec: &WindowRecord,
-    src: Option<HashSink>,
+    src: HashSink,
     tgt: HashSink,
     abort: &AtomicBool,
 ) -> anyhow::Result<WindowResult> {
-    let mut export_src = None;
-    if let Some(src) = src {
-        let dw = finish(&src, &tgt);
-        let mut w = count_result(rec, &dw.target_by_measurement);
-        w.deep = Some(dw.result);
-        if !differs(&w) {
-            return Ok(w);
-        }
-        let r = w.deep.as_ref().expect("deep result");
-        debug!(
-            window = %w.start,
-            source_values = r.source_values,
-            target_values = r.target_values,
-            series_missing = r.series_missing,
-            series_different = r.series_different,
-            example = r.examples.first().map_or("", String::as_str),
-            "export-lp shows a difference, re-reading the source through Flux"
-        );
-        export_src = Some(src.values);
+    let dw = finish(&src, &tgt);
+    let mut w = count_result(rec, &dw.target_by_measurement);
+    w.deep = Some(dw.result);
+    if !differs(&w) {
+        return Ok(w);
     }
+    let r = w.deep.as_ref().expect("deep result");
+    debug!(
+        window = %w.start,
+        source_values = r.source_values,
+        target_values = r.target_values,
+        series_missing = r.series_missing,
+        series_different = r.series_different,
+        example = r.examples.first().map_or("", String::as_str),
+        "export-lp shows a difference, re-reading the source through Flux"
+    );
+    let export_src = src.values;
+    drop(src);
     let fsrc = scan(
         &d.src,
         &d.src_bucket,
@@ -285,17 +270,13 @@ fn export_window(
     let dw = finish(&fsrc, &tgt);
     let mut w = count_result(rec, &dw.target_by_measurement);
     w.deep = Some(dw.result);
-    w.rechecked_via_flux = export_src.is_some();
+    w.rechecked_via_flux = true;
     if !differs(&w) {
-        if let Some(e) = export_src {
-            w.source_values_only_on_disk = e.saturating_sub(fsrc.values);
-        }
-        if w.source_values_only_on_disk > 0
-            && x.source_hidden_windows.fetch_add(1, Ordering::Relaxed) + 1 == SWITCH_AFTER
-        {
-            x.source_via_flux.store(true, Ordering::Relaxed);
+        w.source_values_only_on_disk = export_src.saturating_sub(fsrc.values);
+        if w.source_values_only_on_disk > 0 && !x.warned_hidden.swap(true, Ordering::Relaxed) {
             warn!(
-                "the source bucket holds values on disk that Flux does not return (they could not be migrated); reading the source through Flux from the next chunk on, the target still via export-lp"
+                window = %w.start,
+                "the source bucket holds values on disk that Flux does not return (they could not be migrated); such windows are compared with the source read through Flux"
             );
         }
         return Ok(w);
@@ -445,8 +426,7 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
                 src_id: src_bucket.id,
                 tgt_id: target.id.clone(),
                 chunk_secs,
-                source_via_flux: AtomicBool::new(false),
-                source_hidden_windows: AtomicUsize::new(0),
+                warned_hidden: AtomicBool::new(false),
             })
         } else {
             None
@@ -555,27 +535,27 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
                     .map_err(|_| anyhow::anyhow!("verify workers stopped"))
             };
             let mut idx = 0usize;
-            let mut chunk: Vec<WindowRecord> = Vec::new();
+            // The state file lists windows in completion order (parallel
+            // migration), so export chunks are collected per shard group
+            // and sent once the file is read.
+            let mut groups: BTreeMap<i64, Vec<WindowRecord>> = BTreeMap::new();
             let r = state::for_each_window(&state_path, |rec| {
                 idx += 1;
                 let Some(span) = chunk_secs.filter(|_| (idx - 1).is_multiple_of(every)) else {
                     return send(Job::One(idx - 1, rec));
                 };
-                if let Some(first) = chunk.first()
-                    && (chunk[chunk.len() - 1].stop_ns != rec.start_ns
-                        || chunk_group(first.start_ns, span) != chunk_group(rec.start_ns, span))
-                {
-                    send(Job::Chunk(std::mem::take(&mut chunk)))?;
-                }
-                chunk.push(rec);
+                groups
+                    .entry(chunk_group(rec.start_ns, span))
+                    .or_default()
+                    .push(rec);
                 Ok(())
             })
             .and_then(|_| {
-                if chunk.is_empty() {
-                    Ok(())
-                } else {
-                    send(Job::Chunk(chunk))
+                for (_, mut chunk) in groups {
+                    chunk.sort_by_key(|r| r.start_ns);
+                    send(Job::Chunk(chunk))?;
                 }
+                Ok(())
             });
             drop(job_tx);
             r
@@ -646,12 +626,6 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         }
     });
     mem.stop();
-    if let (Some(t), Some(d)) = (out.deep.as_mut(), &deep) {
-        t.source_switched_to_flux = d
-            .export
-            .as_ref()
-            .is_some_and(|x| x.source_via_flux.load(Ordering::Relaxed));
-    }
     if shared.aborted() {
         return Err(shared
             .take_reason()
@@ -719,13 +693,8 @@ pub fn run(g: &Global, a: &VerifyArgs) -> anyhow::Result<Outcome> {
         if d.source_values_only_on_disk > 0 {
             let _ = writeln!(
                 human,
-                "  {} source values are stored on disk but no query returns them{}",
-                n(d.source_values_only_on_disk),
-                if d.source_switched_to_flux {
-                    " (source then read through Flux)"
-                } else {
-                    ""
-                }
+                "  {} source values are stored on disk but no query returns them",
+                n(d.source_values_only_on_disk)
             );
         }
         for e in d.examples.iter().take(a.top) {

@@ -73,18 +73,15 @@ The tool therefore never reports a mismatch from export-lp alone:
    `source_values_only_on_disk`, and the result gets a warning.
 3. If the window still differs, the target is read through Flux too. That
    Flux result is what gets reported.
-4. After 3 windows with values only on disk, later chunks read the source
-   only through Flux. The target is still read via export-lp. The result
-   then shows `source_switched_to_flux: true`.
+
+Each such window costs one extra Flux read of the source. That is still
+cheaper than reading both sides through Flux.
 
 So the exit code and the counts are the same as with `--read-via flux`. On a
 clean source the run is faster, and as a side effect you learn whether the
 source holds values that no query returns.
 
 ## Speed
-
-**Mixed results so far.** Keep `--read-via flux` as the default for full
-runs until this is resolved.
 
 One week of real data (7.8 M values per side), a throwaway InfluxDB 2.9 on
 4 cores, small shards:
@@ -98,18 +95,22 @@ One week of real data (7.8 M values per side), a throwaway InfluxDB 2.9 on
 `influxd inspect export-lp` alone prints about 2 M lines/s. Above that, the
 cost is the tool's conversion and checksums: about 450 k values/s per stream.
 
-A production installation behaved very differently. It has 364-day shard
-groups and GB-sized TSM files on a FUSE-backed array disk. The sidecar ran
-with a 2 GB memory limit and `--parallel 2`:
+A production installation on the same kind of host had 4 cores, 364-day
+shard groups, TSM files up to 2 GB on an array disk and 800 M values per
+side. The sidecar had a 2 GB memory limit and ran with `--parallel 2`:
 
 | Range | Flux | export-lp |
 |---|---|---|
-| 1 shard group (335 days, 75.6 M values per side) | 525 s | 2387 s |
-| 30 days in weekly shards with values only on disk (28 M per side) | 365 s | 878 s |
+| 1 shard group (335 days, 75.6 M values per side) | 525 s | 175 s |
+| everything (1877 days, 800 M values per side) | about 3 h¹ | 51 min² |
 
-The cause is not confirmed yet. The suspicion is that memory-mapped reads of
-large TSM files thrash under the container memory limit on that storage.
-InfluxDB's own CPU stayed below 10 % during the export-lp run.
+¹ Before this release, with the extra count pass and `--parallel 4`.
+² 331 of the windows had values only on disk (38.6 M values in one year of
+the source), so they were re-read through Flux. Without them the run would,
+by estimate, take about 20 minutes.
+
+Chunks must be whole shard groups. A partial range still decodes the whole
+shard group, so for a few days `--read-via flux` can be faster.
 
 InfluxDB's own process is not involved in export-lp reads. Its heap does not
 grow. The page cache of the TSM files is charged to the process that runs

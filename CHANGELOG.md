@@ -28,8 +28,9 @@ First release.
   comparison (no separate count query).
 - `verify --deep --read-via export-lp`: reads both buckets with
   `influxd inspect export-lp` (`--influxd`, `--engine-path`,
-  `--export-chunk-days`); windows that differ are re-checked through Flux;
-  reports source values stored on disk that no query returns.
+  `--export-chunk-days`, one shard group per call by default); windows that
+  differ are re-checked through Flux; reports source values stored on disk
+  that no query returns.
 - Clean stop on SIGINT/SIGTERM (exit 10), state file lock, repair of a
   partial last line, lost connections classified as exit 3.
 - `analyze` works around an InfluxDB 2.x panic in pushed-down `first()`/`count()`
