@@ -90,10 +90,13 @@ separate count query.
 | `windows[]` | windows with hidden values: `start`, `hidden_pairs`, `hidden_values`, `values_written` |
 | `write_requests`, `rejected_batches`, `elapsed_secs`, `input_types`, `actions`, `rules`, `convert_where_tag`, `resources` | as for `migrate` |
 
-A pair counts as visible in a window when the query API returns it there
-(`first()` per series and field, or a row scan when InfluxDB fails on that).
-The field index that decides this is kept per shard, and a window never spans
-two shards. Visible pairs are never written.
+A pair counts as visible in a window (one day) when the query API returns at
+least one of its values there (`first()` per series and field, or a row scan
+when InfluxDB fails on that). Visible pairs are never written. Hidden are
+fields missing from a shard's field index and values whose stored type differs
+from the field's type in that shard, when they make up a whole day of a pair;
+single hidden values inside a visible pair-day stay where they are (`verify
+--deep --read-via export-lp` reports them as `source_values_only_on_disk`).
 
 ## `cutover`
 

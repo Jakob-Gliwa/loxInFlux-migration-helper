@@ -137,10 +137,11 @@ disk. Queries, Grafana and therefore a normal migration then skip them without
 any error. `verify --deep --read-via export-lp` reports such values as
 `source_values_only_on_disk`.
 
-`recover` copies exactly these values. It reads the storage files with
-`influxd inspect export-lp`, keeps only the measurement/field pairs that a
-query does not return, converts them with the same rules and writes them into
-the migrated bucket. Values the migration already copied are left alone.
+`recover` copies these values. It reads the storage files with
+`influxd inspect export-lp`, keeps per day only the measurement/field pairs
+that a query does not return, converts them with the same rules and writes
+them into the migrated bucket. Values the migration already copied are left
+alone.
 
 ```sh
 # what would be recovered (read-only)

@@ -10,9 +10,11 @@
 //! (measurement, field) pairs that a query returns. export-lp lines of pairs
 //! that are not visible in their window are converted with the migration rules
 //! and written; visible pairs are never written, so nothing the migration
-//! already copied is touched. The field index is kept per shard and a window
-//! never spans two shards, so a pair is either visible for a whole window or
-//! not at all.
+//! already copied is touched. This also catches values whose stored type
+//! differs from the field's type in that shard (queries skip them too) when a
+//! whole window of a pair is affected. Hidden values inside a pair that is
+//! visible in the same window are not written; `verify --deep --read-via
+//! export-lp` still counts them as `source_values_only_on_disk`.
 
 use super::migrate::parse_scope;
 use super::{Resources, connect, connect_target, date, human_duration, sh};
