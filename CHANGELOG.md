@@ -3,7 +3,7 @@
 All notable changes are listed here. The JSON output, exit codes, action names
 and the state file format are a public contract (see AGENTS.md).
 
-## 0.2.0 - unreleased
+## 0.2.0 - 2026-11-22
 
 - `recover`: copies values that the storage files hold but no query returns
   (fields missing from a shard's field index) into the target, converted with
@@ -11,6 +11,9 @@ and the state file format are a public contract (see AGENTS.md).
   query API does not return are written; reads one export-lp call per shard
   group, resumable per chunk, `--dry-run`, JSON result with every hidden pair.
 - e2e test reproduces an invisible field (lost field change log) and recovers it.
+- `verify --read-via export-lp`: a differing window is first re-checked with
+  the target read through Flux (uncompacted duplicate points made export-lp
+  count values twice), then with both sides through Flux.
 
 ## 0.1.0 - 2026-11-22
 

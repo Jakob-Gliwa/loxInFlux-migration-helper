@@ -157,9 +157,10 @@ fn differs(w: &WindowResult) -> bool {
 /// Deep comparison of consecutive windows via export-lp: one export call per
 /// bucket for the whole chunk, then the windows are compared in parallel.
 ///
-/// A window that differs is re-checked through Flux: first only the source
-/// (export-lp can show values no query returns, e.g. a field missing from the
-/// shard's field index), then, if it still differs, both sides. Only a Flux
+/// A window that differs is re-checked through Flux: first only the target
+/// (uncompacted duplicates appear in export-lp but not in queries), then, if
+/// it still differs, the source too (export-lp can show values no query
+/// returns, e.g. a field missing from the shard's field index). Only a Flux
 /// result is ever reported as a mismatch.
 fn export_chunk(
     d: &DeepCtx,
@@ -249,35 +250,40 @@ fn export_window(
         series_missing = r.series_missing,
         series_different = r.series_different,
         example = r.examples.first().map_or("", String::as_str),
-        "export-lp shows a difference, re-reading the source through Flux"
+        "export-lp shows a difference, re-reading the target through Flux"
     );
-    let export_src = src.values;
-    drop(src);
-    let fsrc = scan(
-        &d.src,
-        &d.src_bucket,
-        window_of(rec),
-        &d.rules,
-        &d.scope,
-        abort,
-    )?;
-    let dw = finish(&fsrc, &tgt);
+    // 1. The target may hold the same point in several storage files until
+    //    InfluxDB compacts them (e.g. after a rerun); export-lp prints every
+    //    copy, a query only one. Compare the source from disk with the target
+    //    read through Flux: this also proves values that only the source's
+    //    storage files hold (and `recover` copied).
+    let window = window_of(rec);
+    drop(tgt);
+    let ftgt = scan(client, bucket, window, &d.rules, &d.scope, abort)?;
+    let dw = finish(&src, &ftgt);
     let mut w = count_result(rec, &dw.target_by_measurement);
     w.deep = Some(dw.result);
     w.rechecked_via_flux = true;
     if !differs(&w) {
-        w.source_values_only_on_disk = export_src.saturating_sub(fsrc.values);
-        if w.source_values_only_on_disk > 0 && !x.warned_hidden.swap(true, Ordering::Relaxed) {
-            warn!(
-                window = %w.start,
-                "the source bucket holds values on disk that Flux does not return (they could not be migrated); such windows are compared with the source read through Flux"
-            );
-        }
         return Ok(w);
     }
-    info!(window = %w.start, "difference persists, re-checking the target through Flux too");
-    let mut w = flux_deep(d, client, bucket, rec, abort)?;
+    // 2. The source holds values on disk that no query returns (e.g. a field
+    //    missing from the shard's field index): compare both through Flux.
+    info!(window = %w.start, "difference persists, re-reading the source through Flux too");
+    let export_src = src.values;
+    drop(src);
+    let fsrc = scan(&d.src, &d.src_bucket, window, &d.rules, &d.scope, abort)?;
+    let dw = finish(&fsrc, &ftgt);
+    let mut w = count_result(rec, &dw.target_by_measurement);
+    w.deep = Some(dw.result);
     w.rechecked_via_flux = true;
+    w.source_values_only_on_disk = export_src.saturating_sub(fsrc.values);
+    if w.source_values_only_on_disk > 0 && !x.warned_hidden.swap(true, Ordering::Relaxed) {
+        warn!(
+            window = %w.start,
+            "the source bucket holds values on disk that Flux does not return; `recover` copies them"
+        );
+    }
     Ok(w)
 }
 

@@ -58,24 +58,27 @@ processes, one for the source and one for the target.
 export-lp shows what is stored on disk. Flux shows what InfluxDB returns. The
 two can differ:
 
-* Overwritten or deleted points that compaction has not removed yet.
+* Points written more than once (for example by a rerun or by `recover`)
+  that compaction has not merged yet: export-lp prints every copy, a query
+  returns one. Deleted points that compaction has not removed yet.
 * Values of a field that is missing from the shard's field index. In a real
   installation this affected about 12 % of the values in some months after
   earlier type-conflict clean-ups. No query returns such values, so a Flux
-  based migration cannot copy them.
+  based migration cannot copy them; `recover` can.
 
 The tool therefore never reports a mismatch from export-lp alone:
 
-1. If a window differs, the tool reads the source through Flux again and
-   compares it with the target from export-lp.
-2. If the two now match, the window is ok (`rechecked_via_flux: true`). The
-   source values that only export-lp saw are counted in
-   `source_values_only_on_disk`, and the result gets a warning.
-3. If the window still differs, the target is read through Flux too. That
-   Flux result is what gets reported.
+1. If a window differs, the tool reads the target through Flux and compares
+   it with the source from export-lp. If they match, the window is ok
+   (`rechecked_via_flux: true`). This also confirms values that only the
+   source's storage files hold, once `recover` has copied them.
+2. If the window still differs, the source is read through Flux too and both
+   Flux results are compared; that is what gets reported. Source values that
+   only export-lp saw are counted in `source_values_only_on_disk`, with a
+   warning.
 
-Each such window costs one extra Flux read of the source. That is still
-cheaper than reading both sides through Flux.
+Each such window costs one or two extra Flux reads. That is still cheaper
+than reading both sides through Flux.
 
 So the exit code and the counts are the same as with `--read-via flux`. On a
 clean source the run is faster, and as a side effect you learn whether the
